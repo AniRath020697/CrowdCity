@@ -51,14 +51,27 @@ public class PlayerController : MonoBehaviour
     public GameObject shockwavePrefab;
     public TextMeshProUGUI shockwaveCooldownText;
 
+    [Header("Super power key hint")]
+    [Tooltip("Bottom-left key label (e.g. [SHIFT]). Auto-created at Play if empty.")]
+    public TextMeshProUGUI superPowerKeyHintText;
+
+    [Tooltip("When off, the Inspector Rect Transform on your UI texts is kept (position/size you set).")]
+    public bool applySuperPowerUiLayout = false;
+
     private Rigidbody rb;
     private float shockwaveTimer = 0f;
     private Vector3 moveDir;
     private float dashCooldownRemaining;
     private float rallyCooldownRemaining;
     private bool dashInProgress;
+
+    public bool IsTurboDashing => dashInProgress;
+
+    public float TurboDashMoveSpeed =>
+        waveDashDistance / Mathf.Max(0.05f, waveDashDuration);
     private Coroutine surgeRoutine;
     private Coroutine dashRoutine;
+    private bool _superPowerUiLayoutConfigured;
 
     [Header("NavMesh")]
     [Tooltip("Slide along the baked NavMesh when CrowdManager allows it and data exists.")]
@@ -68,7 +81,9 @@ public class PlayerController : MonoBehaviour
     {
         rb = GetComponent<Rigidbody>();
         rb.useGravity = false;
-        rb.freezeRotation = true;
+        rb.isKinematic = true;
+        rb.interpolation = RigidbodyInterpolation.None;
+        rb.constraints = RigidbodyConstraints.FreezeRotation;
     }
 
     void Update()
@@ -85,33 +100,43 @@ public class PlayerController : MonoBehaviour
         }
 
         UpdateCooldownUI();
+        UpdateSuperPowerKeyHintUI();
 
         dashCooldownRemaining -= Time.deltaTime;
         rallyCooldownRemaining -= Time.deltaTime;
         if (dashCooldownRemaining < 0f) dashCooldownRemaining = 0f;
         if (rallyCooldownRemaining < 0f) rallyCooldownRemaining = 0f;
 
-        if (activeWaveAbility == PlayerWaveAbility.TurboDash
-            && Input.GetKeyDown(KeyCode.LeftShift)
-            && !dashInProgress
-            && dashCooldownRemaining <= 0f)
-        {
-            if (dashRoutine != null)
-                StopCoroutine(dashRoutine);
-            dashRoutine = StartCoroutine(CoTurboDash());
-        }
+        HandleWaveSuperPowerInput();
+    }
 
-        if (activeWaveAbility == PlayerWaveAbility.RallyCry
-            && Input.GetKeyDown(KeyCode.F)
-            && rallyCooldownRemaining <= 0f)
+    void HandleWaveSuperPowerInput()
+    {
+        switch (activeWaveAbility)
         {
-            TryRallyCry();
-        }
+            case PlayerWaveAbility.TurboDash:
+                if (Input.GetKeyDown(KeyCode.LeftShift)
+                    && !dashInProgress
+                    && dashCooldownRemaining <= 0f)
+                {
+                    if (dashRoutine != null)
+                        StopCoroutine(dashRoutine);
+                    dashRoutine = StartCoroutine(CoTurboDash());
+                }
+                break;
 
-        if (Input.GetKeyDown(KeyCode.E) && shockwaveTimer <= 0f)
-        {
-            ActivateShockwave();
-            shockwaveTimer = shockwaveCooldown * Mathf.Max(0.05f, waveShockwaveCooldownMultiplier);
+            case PlayerWaveAbility.RallyCry:
+                if (Input.GetKeyDown(KeyCode.F) && rallyCooldownRemaining <= 0f)
+                    TryRallyCry();
+                break;
+
+            case PlayerWaveAbility.SurgePulse:
+                if (Input.GetKeyDown(KeyCode.E) && shockwaveTimer <= 0f)
+                {
+                    ActivateShockwave();
+                    shockwaveTimer = shockwaveCooldown * Mathf.Max(0.05f, waveShockwaveCooldownMultiplier);
+                }
+                break;
         }
     }
 
@@ -141,20 +166,150 @@ public class PlayerController : MonoBehaviour
 
     void UpdateCooldownUI()
     {
-        if (shockwaveTimer > 0f)
-        {
+        if (shockwaveCooldownText == null)
+            return;
+
+        ConfigureSuperPowerStatusUILayout();
+
+        if (activeWaveAbility == PlayerWaveAbility.SurgePulse && shockwaveTimer > 0f)
             shockwaveTimer -= Time.deltaTime;
 
-            if (shockwaveCooldownText != null)
-                shockwaveCooldownText.text = "SHOCKWAVE: " + Mathf.CeilToInt(shockwaveTimer);
-        }
-        else
-        {
-            shockwaveTimer = 0f;
+        string powerName = GetWaveSuperPowerDisplayName(activeWaveAbility, true);
+        float cooldown = GetActiveSuperPowerCooldownRemaining();
 
-            if (shockwaveCooldownText != null)
-                shockwaveCooldownText.text = "SHOCKWAVE: READY";
+        if (activeWaveAbility == PlayerWaveAbility.None)
+        {
+            shockwaveCooldownText.gameObject.SetActive(false);
+            return;
         }
+
+        shockwaveCooldownText.gameObject.SetActive(true);
+
+        if (cooldown > 0f)
+            shockwaveCooldownText.text = powerName + " = " + Mathf.CeilToInt(cooldown);
+        else
+            shockwaveCooldownText.text = powerName + " = READY";
+    }
+
+    void ConfigureSuperPowerStatusUILayout()
+    {
+        if (_superPowerUiLayoutConfigured || shockwaveCooldownText == null)
+            return;
+
+        _superPowerUiLayoutConfigured = true;
+
+        shockwaveCooldownText.enableWordWrapping = false;
+        shockwaveCooldownText.overflowMode = TextOverflowModes.Overflow;
+
+        if (!applySuperPowerUiLayout)
+            return;
+
+        RectTransform rt = shockwaveCooldownText.rectTransform;
+        rt.anchorMin = new Vector2(1f, 0f);
+        rt.anchorMax = new Vector2(1f, 0f);
+        rt.pivot = new Vector2(1f, 0f);
+        rt.anchoredPosition = new Vector2(-28f, 28f);
+        rt.sizeDelta = new Vector2(440f, 52f);
+        shockwaveCooldownText.alignment = TextAlignmentOptions.BottomRight;
+        shockwaveCooldownText.fontSize = 28f;
+    }
+
+    float GetActiveSuperPowerCooldownRemaining()
+    {
+        switch (activeWaveAbility)
+        {
+            case PlayerWaveAbility.TurboDash:
+                return dashCooldownRemaining;
+            case PlayerWaveAbility.RallyCry:
+                return rallyCooldownRemaining;
+            case PlayerWaveAbility.SurgePulse:
+                return Mathf.Max(0f, shockwaveTimer);
+            default:
+                return 0f;
+        }
+    }
+
+    static string GetWaveSuperPowerDisplayName(PlayerWaveAbility ability, bool upperCase = false)
+    {
+        string name;
+        switch (ability)
+        {
+            case PlayerWaveAbility.TurboDash: name = "Turbo Dash"; break;
+            case PlayerWaveAbility.RallyCry: name = "Rally Cry"; break;
+            case PlayerWaveAbility.SurgePulse: name = "Surge Pulse"; break;
+            default: name = "Shockwave"; break;
+        }
+
+        return upperCase ? name.ToUpperInvariant() : name;
+    }
+
+    string GetWaveSuperPowerDisplayName()
+    {
+        return GetWaveSuperPowerDisplayName(activeWaveAbility);
+    }
+
+    static string GetWaveSuperPowerKeyLabel(PlayerWaveAbility ability)
+    {
+        switch (ability)
+        {
+            case PlayerWaveAbility.TurboDash: return "Shift";
+            case PlayerWaveAbility.RallyCry: return "F";
+            case PlayerWaveAbility.SurgePulse: return "E";
+            default: return "-";
+        }
+    }
+
+    void EnsureSuperPowerKeyHintUI()
+    {
+        if (superPowerKeyHintText != null)
+            return;
+
+        Canvas canvas = FindFirstObjectByType<Canvas>();
+        if (canvas == null)
+            return;
+
+        var go = new GameObject("SuperPowerKeyHint", typeof(RectTransform));
+        go.transform.SetParent(canvas.transform, false);
+        go.transform.SetAsLastSibling();
+
+        RectTransform rt = go.GetComponent<RectTransform>();
+        rt.anchorMin = new Vector2(0f, 0f);
+        rt.anchorMax = new Vector2(0f, 0f);
+        rt.pivot = new Vector2(0f, 0f);
+        rt.anchoredPosition = new Vector2(28f, 28f);
+        rt.sizeDelta = new Vector2(200f, 52f);
+
+        superPowerKeyHintText = go.AddComponent<TextMeshProUGUI>();
+        superPowerKeyHintText.alignment = TextAlignmentOptions.BottomLeft;
+        superPowerKeyHintText.enableWordWrapping = false;
+        superPowerKeyHintText.overflowMode = TextOverflowModes.Overflow;
+        superPowerKeyHintText.fontSize = 30;
+        superPowerKeyHintText.fontStyle = FontStyles.Bold;
+        superPowerKeyHintText.color = new Color(0.92f, 0.95f, 1f);
+        superPowerKeyHintText.raycastTarget = false;
+
+        if (shockwaveCooldownText != null)
+            superPowerKeyHintText.font = shockwaveCooldownText.font;
+    }
+
+    void UpdateSuperPowerKeyHintUI()
+    {
+        EnsureSuperPowerKeyHintUI();
+        if (superPowerKeyHintText == null)
+            return;
+
+        superPowerKeyHintText.enableWordWrapping = false;
+        superPowerKeyHintText.overflowMode = TextOverflowModes.Overflow;
+
+        if (activeWaveAbility == PlayerWaveAbility.None)
+        {
+            superPowerKeyHintText.gameObject.SetActive(false);
+            return;
+        }
+
+        superPowerKeyHintText.gameObject.SetActive(true);
+        superPowerKeyHintText.text =
+            "[" + GetWaveSuperPowerKeyLabel(activeWaveAbility).ToUpperInvariant() + "]";
     }
 
     public void ResetWaveAbilityState()
@@ -174,6 +329,8 @@ public class PlayerController : MonoBehaviour
         dashInProgress = false;
         dashCooldownRemaining = 0f;
         rallyCooldownRemaining = 0f;
+        shockwaveTimer = 0f;
+        UpdateSuperPowerKeyHintUI();
     }
 
     void ActivateShockwave()
@@ -255,17 +412,23 @@ public class PlayerController : MonoBehaviour
         while (elapsed < duration)
         {
             float step = speed * Time.fixedDeltaTime;
-            Vector3 next = rb.position + dir * step;
+            Vector3 from = rb.position;
+            Vector3 next = from + dir * step;
 
             bool nav = useNavMeshConstraint
                 && CrowdManager.Instance != null
                 && CrowdManager.Instance.ShouldConstrainToNavMesh();
 
-            if (nav && CrowdManager.Instance.TryCrowdNavMove(rb.position, next, out Vector3 clamped))
+            if (nav && CrowdManager.Instance.TryCrowdNavMove(from, next, out Vector3 clamped))
                 next = clamped;
 
             if (CrowdManager.Instance != null)
+            {
                 CrowdManager.Instance.ApplyPositionWithStreetGround(next, transform);
+                Vector3 delta = rb.position - from;
+                if (delta.sqrMagnitude > 0.0001f)
+                    CrowdManager.Instance.MovePlayerFollowersBy(delta);
+            }
             else
                 rb.MovePosition(next);
 

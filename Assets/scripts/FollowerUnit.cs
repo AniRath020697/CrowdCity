@@ -16,6 +16,10 @@ public class FollowerUnit : MonoBehaviour
 
     [Header("Back Blob Formation")]
     public float spacing = 1.4f;
+
+    [Tooltip("Followers never target a spot closer than this to the leader (stops large crowds from piling on the player).")]
+    public float minDistanceFromLeader = 1.45f;
+
     public float blobRandomness = 0.45f;
     public float blobWaveAmount = 0.25f;
     public float blobWaveSpeed = 2.5f;
@@ -89,6 +93,8 @@ public class FollowerUnit : MonoBehaviour
         indexInCrowd = index;
     }
 
+    public Transform GetLeaderTransform() => leader;
+
     void FixedUpdate()
     {
         float dt = Time.fixedDeltaTime;
@@ -105,11 +111,25 @@ public class FollowerUnit : MonoBehaviour
         Vector3 targetPos = GetBackBlobPosition();
         targetPos.y = current.y;
 
-        Vector3 next = Vector3.Lerp(
-            current,
-            targetPos,
-            followSpeed * dt
-        );
+        float moveSpeed = followSpeed;
+        if (team == CrowdTeam.Player
+            && leader != null
+            && CrowdManager.Instance != null
+            && leader == CrowdManager.Instance.player)
+        {
+            PlayerController pc = leader.GetComponent<PlayerController>();
+            if (pc != null && pc.IsTurboDashing)
+                moveSpeed = Mathf.Max(moveSpeed, pc.TurboDashMoveSpeed * 1.08f);
+        }
+
+        float maxStep = moveSpeed * dt;
+        Vector3 flatDelta = targetPos - current;
+        flatDelta.y = 0f;
+        float dist = flatDelta.magnitude;
+        if (dist > 0.01f && dist < minDistanceFromLeader)
+            maxStep *= Mathf.Clamp01(dist / minDistanceFromLeader);
+
+        Vector3 next = Vector3.MoveTowards(current, targetPos, maxStep);
 
         TryNavMeshClamp(current, ref next);
         ApplyWorldPosition(next);
@@ -220,14 +240,53 @@ public class FollowerUnit : MonoBehaviour
         xOffset += randomOffsetX + waveX;
         zOffset += randomOffsetZ + waveZ;
 
-        Vector3 right = leader.right;
-        Vector3 back = -leader.forward;
-
         Vector3 leaderPos = leader.position;
         if (CrowdManager.Instance != null && leader == CrowdManager.Instance.player)
             leaderPos = CrowdManager.Instance.GetActorWorldPosition(leader);
 
-        return leaderPos + right * xOffset + back * Mathf.Abs(zOffset);
+        Vector3 back = GetLeaderBackDirection();
+        Vector3 right = Vector3.Cross(Vector3.up, back);
+        if (right.sqrMagnitude < 0.0001f)
+            right = leader.right;
+        else
+            right.Normalize();
+
+        Vector3 pos = leaderPos + right * xOffset + back * Mathf.Abs(zOffset);
+
+        Vector3 offset = pos - leaderPos;
+        offset.y = 0f;
+        float minDist = Mathf.Max(0.5f, minDistanceFromLeader);
+        if (offset.sqrMagnitude < minDist * minDist)
+        {
+            offset = offset.sqrMagnitude > 0.0001f ? offset.normalized * minDist : back * minDist;
+            pos = leaderPos + offset;
+        }
+
+        pos.y = leaderPos.y;
+        return pos;
+    }
+
+    Vector3 GetLeaderBackDirection()
+    {
+        Vector3 back = -leader.forward;
+        back.y = 0f;
+
+        if (back.sqrMagnitude < 0.01f)
+            back = Vector3.back;
+
+        if (CrowdManager.Instance != null && leader == CrowdManager.Instance.player)
+        {
+            Rigidbody leaderRb = leader.GetComponent<Rigidbody>();
+            if (leaderRb != null)
+            {
+                Vector3 vel = leaderRb.linearVelocity;
+                vel.y = 0f;
+                if (vel.sqrMagnitude > 0.35f)
+                    back = -vel.normalized;
+            }
+        }
+
+        return back.normalized;
     }
 
     void MakeRandomOffset()
@@ -277,6 +336,13 @@ public class FollowerUnit : MonoBehaviour
     void SetNewRoamTarget()
     {
         roamTimer = 0f;
+
+        if (team == CrowdTeam.Neutral && CrowdManager.Instance != null &&
+            CrowdManager.Instance.TryGetRandomCityRoamPoint(out Vector3 cityPoint))
+        {
+            roamTarget = cityPoint;
+            return;
+        }
 
         Vector3 center = Vector3.zero;
         float range = roamRange;
@@ -338,30 +404,46 @@ public class FollowerUnit : MonoBehaviour
         {
             if (enemyLeader != null)
             {
-                CrowdManager.Instance.ResolveBattle();
+                CrowdManager.Instance.ResolveBattle(enemyLeader);
                 return;
             }
 
             if (otherUnit != null && otherUnit.team == CrowdTeam.Enemy)
             {
-                CrowdManager.Instance.ResolveBattle();
+                CrowdManager.Instance.ResolveBattle(ResolveEnemyLeaderFromUnit(otherUnit));
                 return;
             }
         }
 
         if (team == CrowdTeam.Enemy)
         {
+            EnemyLeader myLeader = leader != null ? leader.GetComponent<EnemyLeader>() : null;
+
             if (player != null)
             {
-                CrowdManager.Instance.ResolveBattle();
+                CrowdManager.Instance.ResolveBattle(myLeader);
                 return;
             }
 
             if (otherUnit != null && otherUnit.team == CrowdTeam.Player)
             {
-                CrowdManager.Instance.ResolveBattle();
+                CrowdManager.Instance.ResolveBattle(myLeader);
                 return;
             }
         }
+    }
+
+    static EnemyLeader ResolveEnemyLeaderFromUnit(FollowerUnit enemyUnit)
+    {
+        if (enemyUnit == null) return null;
+
+        Transform leaderT = enemyUnit.GetLeaderTransform();
+        if (leaderT != null)
+        {
+            EnemyLeader el = leaderT.GetComponent<EnemyLeader>();
+            if (el != null) return el;
+        }
+
+        return enemyUnit.GetComponentInParent<EnemyLeader>();
     }
 }

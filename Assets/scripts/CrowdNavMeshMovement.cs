@@ -29,6 +29,23 @@ public static class CrowdNavMeshMovement
         _availabilityChecked = false;
     }
 
+    public static bool TrySampleOnNavMesh(Vector3 worldPos, float sampleRadius, int areaMask, out Vector3 onMesh)
+    {
+        onMesh = worldPos;
+
+        if (!_availabilityChecked)
+            RefreshAvailability();
+        if (!_hasNavMesh)
+            return false;
+
+        Vector3 probe = new Vector3(worldPos.x, worldPos.y, worldPos.z);
+        if (!NavMesh.SamplePosition(probe, out NavMeshHit hit, sampleRadius, areaMask))
+            return false;
+
+        onMesh = hit.position;
+        return true;
+    }
+
     /// <summary>
     /// Horizontal slide along NavMesh edges. Height is preserved; street filtering blocks stepping onto roof/prop NavMesh.
     /// </summary>

@@ -34,6 +34,9 @@ public class EnemyLeader : MonoBehaviour
     public float wanderRange = 40f;
     public float chaseDistance = 100f;
 
+    [Tooltip("When on, always chases the player instead of wandering (wave hunters).")]
+    public bool alwaysHuntPlayer;
+
     [Header("Animation")]
     public Animator animator;
 
@@ -99,7 +102,15 @@ public class EnemyLeader : MonoBehaviour
             Vector3 playerPos = CrowdManager.Instance.GetActorWorldPosition(player);
             float distanceToPlayer = Vector3.Distance(WorldPosition, playerPos);
 
-            if (playerIsStronger
+            if (alwaysHuntPlayer)
+            {
+                ChasePlayer(playerPos);
+                UpdateAnimation();
+                return;
+            }
+
+            if (activeWaveAbility == EnemyWaveAbility.EchoBlast
+                && playerIsStronger
                 && distanceToPlayer <= shockwaveReach
                 && shockwaveTimer <= 0f)
             {
@@ -138,10 +149,7 @@ public class EnemyLeader : MonoBehaviour
 
     float ShockwaveTriggerDistance()
     {
-        float r = shockwaveRadius;
-        if (activeWaveAbility == EnemyWaveAbility.Harrier)
-            return r * 1.15f;
-        return r;
+        return shockwaveRadius;
     }
 
     void CreepTowardPlayer(Vector3 playerPos)
@@ -339,7 +347,7 @@ public class EnemyLeader : MonoBehaviour
 
         if (playerController != null)
         {
-            CrowdManager.Instance.ResolveBattle();
+            CrowdManager.Instance.ResolveBattle(this);
             return;
         }
 
@@ -353,7 +361,7 @@ public class EnemyLeader : MonoBehaviour
 
             if (unit.team == FollowerUnit.CrowdTeam.Player)
             {
-                CrowdManager.Instance.ResolveBattle();
+                CrowdManager.Instance.ResolveBattle(this);
                 return;
             }
         }

@@ -17,11 +17,32 @@ public class CrowdManager : MonoBehaviour
     public TextMeshProUGUI enemyCrowdText;
     public TextMeshProUGUI timerText;
 
+    [Header("Wave end warning")]
+    [Tooltip("Optional. Auto-created under the timer if empty. Shown only in the last few seconds of each wave.")]
+    public TextMeshProUGUI waveEndTimerText;
+
+    [Tooltip("Show wave end warning when this many seconds or less remain in the wave.")]
+    public float waveEndWarningSeconds = 10f;
+
     [Header("Game Settings")]
     public float gameTime = 60f;
     public int neutralNPCCount = 40;
     public int enemyStartCount = 6;
     public float spawnRange = 40f;
+
+    [Header("City population")]
+    [Tooltip("Optional center for city-wide pedestrian spawn/roam. If unset, bounds are derived from wave zones or play area.")]
+    public Transform cityPopulationCenter;
+
+    [Tooltip("Half-size of the city rectangle on X and Z (metres) when not auto-sized from wave zones.")]
+    public Vector2 cityPopulationHalfExtents = new Vector2(85f, 75f);
+
+    [Tooltip("Share of recruitable neutrals spawned closer to the current wave district (rest spread city-wide).")]
+    [Range(0f, 1f)]
+    public float neutralSpawnNearPlayAreaFraction = 0.38f;
+
+    [Tooltip("Radius around the wave play area for denser recruitable spawns.")]
+    public float neutralNearPlayAreaRadius = 36f;
 
     [Header("City / walkable play space")]
     [Tooltip("Optional anchor in the city. If unset, the player's XZ at play start defines the spawn/roam center.")]
@@ -106,10 +127,13 @@ public class CrowdManager : MonoBehaviour
     public bool useWaveManagerForSpawning;
 
     private EnemyLeader enemyLeader;
+    readonly List<EnemyLeader> enemyLeaders = new List<EnemyLeader>();
     private float timeLeft;
     private bool gameOver;
     private bool resolvingBattle = false;
     private GameObject _runtimeGameplayFloor;
+    private Vector3 _cityPopulationCenterXZ;
+    private bool _cityBoundsConfigured;
 
     void Awake()
     {
@@ -173,6 +197,26 @@ public class CrowdManager : MonoBehaviour
         return rb != null ? rb.position : t.position;
     }
 
+    /// <summary>Moves the whole player crowd by the same delta as the leader (e.g. Turbo Dash).</summary>
+    public void MovePlayerFollowersBy(Vector3 worldDelta)
+    {
+        worldDelta.y = 0f;
+        if (worldDelta.sqrMagnitude < 0.0001f) return;
+
+        for (int i = 0; i < playerFollowers.Count; i++)
+        {
+            GameObject go = playerFollowers[i];
+            if (go == null) continue;
+
+            Transform t = go.transform;
+            Rigidbody followerRb = t.GetComponent<Rigidbody>();
+            Vector3 from = followerRb != null ? followerRb.position : t.position;
+            Vector3 to = from + worldDelta;
+
+            ApplyPositionWithStreetGround(to, t);
+        }
+    }
+
     /// <summary>Sets world XZ from <paramref name="worldPos"/> and snaps feet to street ground.</summary>
     public void ApplyPositionWithStreetGround(Vector3 worldPos, Transform t)
     {
@@ -221,7 +265,10 @@ public class CrowdManager : MonoBehaviour
             SetColor(player.gameObject, playerColor);
 
         if (player != null)
+        {
+            ConfigureCrowdCharacterPhysics(player.gameObject);
             SnapRigidbodyToWalkable(player);
+        }
 
         if (!useWaveManagerForSpawning)
         {
@@ -229,6 +276,7 @@ public class CrowdManager : MonoBehaviour
             SpawnEnemyCrowd();
         }
 
+        EnsureWaveEndTimerText();
         UpdateUI();
 
         CrowdNavMeshMovement.RefreshAvailability();
@@ -241,6 +289,128 @@ public class CrowdManager : MonoBehaviour
         if (player != null)
             return new Vector3(player.position.x, 0f, player.position.z);
         return Vector3.zero;
+    }
+
+    public Vector3 GetCityPopulationCenterXZ()
+    {
+        if (cityPopulationCenter != null)
+            return new Vector3(cityPopulationCenter.position.x, 0f, cityPopulationCenter.position.z);
+        if (_cityBoundsConfigured)
+            return _cityPopulationCenterXZ;
+        return GetPlayAreaOriginXZ();
+    }
+
+    public Vector2 GetCityPopulationHalfExtents()
+    {
+        return new Vector2(
+            Mathf.Max(20f, cityPopulationHalfExtents.x),
+            Mathf.Max(20f, cityPopulationHalfExtents.y));
+    }
+
+    /// <summary>Fit city pedestrian bounds around all wave districts so neutrals fill the map.</summary>
+    public void ConfigureCityPopulationFromWaveZones(WaveZone[] zones, float padding = 40f)
+    {
+        if (zones == null || zones.Length == 0)
+            return;
+
+        float minX = float.MaxValue;
+        float maxX = float.MinValue;
+        float minZ = float.MaxValue;
+        float maxZ = float.MinValue;
+        int count = 0;
+
+        foreach (WaveZone zone in zones)
+        {
+            if (zone == null || zone.playAreaCenter == null)
+                continue;
+
+            Vector3 p = zone.playAreaCenter.position;
+            minX = Mathf.Min(minX, p.x);
+            maxX = Mathf.Max(maxX, p.x);
+            minZ = Mathf.Min(minZ, p.z);
+            maxZ = Mathf.Max(maxZ, p.z);
+            count++;
+        }
+
+        if (count == 0)
+            return;
+
+        _cityPopulationCenterXZ = new Vector3((minX + maxX) * 0.5f, 0f, (minZ + maxZ) * 0.5f);
+        _cityBoundsConfigured = true;
+
+        float halfX = (maxX - minX) * 0.5f + padding;
+        float halfZ = (maxZ - minZ) * 0.5f + padding;
+        cityPopulationHalfExtents = new Vector2(Mathf.Max(55f, halfX), Mathf.Max(55f, halfZ));
+    }
+
+    public bool TryGetRandomCityRoamPoint(out Vector3 worldPos)
+    {
+        worldPos = default;
+        Vector3 center = GetCityPopulationCenterXZ();
+        Vector2 half = GetCityPopulationHalfExtents();
+
+        const int maxAttempts = 14;
+        for (int i = 0; i < maxAttempts; i++)
+        {
+            float x = center.x + Random.Range(-half.x, half.x);
+            float z = center.z + Random.Range(-half.y, half.y);
+            Vector3 candidate = SnapToWalkableHeight(new Vector3(x, 0f, z));
+
+            bool useNav = ShouldConstrainToNavMesh();
+            if (!useNav)
+            {
+                worldPos = candidate;
+                return true;
+            }
+
+            if (CrowdNavMeshMovement.TrySampleOnNavMesh(candidate, navMeshSampleRadius * 2.5f, navMeshAreaMask, out Vector3 onMesh))
+            {
+                worldPos = onMesh;
+                return true;
+            }
+        }
+
+        worldPos = SnapToWalkableHeight(center);
+        return true;
+    }
+
+    Vector3 GetRandomNeutralSpawnPosition()
+    {
+        const int maxAttempts = 16;
+        for (int i = 0; i < maxAttempts; i++)
+        {
+            Vector3 xz = Random.value < neutralSpawnNearPlayAreaFraction
+                ? PickRandomNearPlayAreaXZ()
+                : PickRandomCityXZ();
+
+            Vector3 pos = SnapToWalkableHeight(xz);
+
+            if (!ShouldConstrainToNavMesh())
+                return pos;
+
+            if (CrowdNavMeshMovement.TrySampleOnNavMesh(pos, navMeshSampleRadius * 2.5f, navMeshAreaMask, out Vector3 onMesh))
+                return onMesh;
+        }
+
+        return GetRandomPosition();
+    }
+
+    Vector3 PickRandomCityXZ()
+    {
+        Vector3 center = GetCityPopulationCenterXZ();
+        Vector2 half = GetCityPopulationHalfExtents();
+        float x = center.x + Random.Range(-half.x, half.x);
+        float z = center.z + Random.Range(-half.y, half.y);
+        return new Vector3(x, 0f, z);
+    }
+
+    Vector3 PickRandomNearPlayAreaXZ()
+    {
+        Vector3 origin = GetPlayAreaOriginXZ();
+        float radius = neutralNearPlayAreaRadius > 1f ? neutralNearPlayAreaRadius : spawnRange;
+        float x = origin.x + Random.Range(-radius, radius);
+        float z = origin.z + Random.Range(-radius, radius);
+        return new Vector3(x, 0f, z);
     }
 
     float GetReferenceGroundY()
@@ -437,7 +607,7 @@ public class CrowdManager : MonoBehaviour
         if (timeLeft <= 0)
         {
             timeLeft = 0;
-            EndGameByScore();
+            OnRunTimerExpired();
         }
 
         UpdateUI();
@@ -447,7 +617,7 @@ public class CrowdManager : MonoBehaviour
     {
         for (int i = 0; i < neutralNPCCount; i++)
         {
-            GameObject npc = Instantiate(followerPrefab, GetRandomPosition(), Quaternion.identity);
+            GameObject npc = Instantiate(followerPrefab, GetRandomNeutralSpawnPosition(), Quaternion.identity);
 
             FollowerUnit unit = npc.GetComponent<FollowerUnit>();
             if (unit == null)
@@ -463,46 +633,180 @@ public class CrowdManager : MonoBehaviour
 
     public void SpawnEnemyCrowd()
     {
+        if (useWaveManagerForSpawning)
+        {
+            int leaders = waveEnemyLeaderCount > 0 ? waveEnemyLeaderCount : 1;
+            SpawnWaveEnemyLeaders(leaders, spawnOneEnemyNearPlayer: true);
+            return;
+        }
+
+        SpawnClassicEnemyCrowd();
+    }
+
+    void SpawnClassicEnemyCrowd()
+    {
         resolvingBattle = false;
 
         if (gameOver) return;
         if (enemyLeaderPrefab == null) return;
 
-        enemyFollowers.Clear();
+        DestroyActiveEnemyCrowd();
 
         GameObject enemyObj = Instantiate(enemyLeaderPrefab, GetRandomPosition(), Quaternion.identity);
+        EnemyLeader leader = RegisterEnemyLeader(enemyObj);
+        if (leader == null) return;
 
-        enemyLeader = enemyObj.GetComponent<EnemyLeader>();
-        if (enemyLeader == null)
-            enemyLeader = enemyObj.AddComponent<EnemyLeader>();
-
-        enemyLeader.wanderRange = spawnRange;
+        leader.wanderRange = spawnRange;
         SetupLeaderPhysics(enemyObj);
         SetColor(enemyObj, enemyColor);
 
         for (int i = 0; i < enemyStartCount; i++)
-        {
-            Vector3 pos = enemyObj.transform.position + new Vector3(Random.Range(-3f, 3f), 0f, Random.Range(-3f, 3f));
-            pos = SnapToWalkableHeight(new Vector3(pos.x, 0f, pos.z));
-
-            GameObject follower = Instantiate(followerPrefab, pos, Quaternion.identity);
-
-            FollowerUnit unit = follower.GetComponent<FollowerUnit>();
-            if (unit == null)
-                unit = follower.AddComponent<FollowerUnit>();
-
-            enemyFollowers.Add(follower);
-            unit.SetFollower(FollowerUnit.CrowdTeam.Enemy, enemyLeader.transform, enemyFollowers.Count - 1);
-
-            if (useTeamTintOnFollowers)
-                SetColor(follower, enemyColor);
-            SetupFollowerAnimator(follower);
-            SetupFollowerPhysics(follower);
-        }
+            SpawnEnemyFollowerForLeader(leader.transform, enemyObj.transform.position);
 
         RefreshEnemyFormation();
-        ApplyWaveModifiersToActiveEnemy();
+        ApplyWaveModifiersToActiveEnemies();
         UpdateUI();
+    }
+
+    [HideInInspector] public int waveEnemyLeaderCount = 3;
+
+    public void SpawnWaveEnemyLeaders(int leaderCount, bool spawnOneEnemyNearPlayer)
+    {
+        resolvingBattle = false;
+
+        if (gameOver || enemyLeaderPrefab == null || leaderCount <= 0)
+            return;
+
+        DestroyActiveEnemyCrowd();
+
+        for (int i = 0; i < leaderCount; i++)
+        {
+            Vector3 pos = i == 0 && spawnOneEnemyNearPlayer
+                ? GetEnemySpawnNearPlayer()
+                : GetRandomNeutralSpawnPosition();
+
+            GameObject enemyObj = Instantiate(enemyLeaderPrefab, pos, Quaternion.identity);
+            EnemyLeader leader = RegisterEnemyLeader(enemyObj);
+            if (leader == null) continue;
+
+            leader.wanderRange = Mathf.Max(spawnRange, 120f);
+            leader.alwaysHuntPlayer = true;
+            SetupLeaderPhysics(enemyObj);
+            SetColor(enemyObj, enemyColor);
+
+            for (int f = 0; f < enemyStartCount; f++)
+                SpawnEnemyFollowerForLeader(leader.transform, pos);
+        }
+
+        SyncPrimaryEnemyLeader();
+        RefreshEnemyFormation();
+        ApplyWaveModifiersToActiveEnemies();
+        UpdateUI();
+    }
+
+    EnemyLeader RegisterEnemyLeader(GameObject enemyObj)
+    {
+        EnemyLeader leader = enemyObj.GetComponent<EnemyLeader>();
+        if (leader == null)
+            leader = enemyObj.AddComponent<EnemyLeader>();
+
+        if (!enemyLeaders.Contains(leader))
+            enemyLeaders.Add(leader);
+
+        return leader;
+    }
+
+    void SyncPrimaryEnemyLeader()
+    {
+        enemyLeader = enemyLeaders.Count > 0 ? enemyLeaders[0] : null;
+    }
+
+    void SpawnEnemyFollowerForLeader(Transform leaderTransform, Vector3 nearPosition)
+    {
+        Vector3 pos = nearPosition + new Vector3(Random.Range(-3f, 3f), 0f, Random.Range(-3f, 3f));
+        pos = SnapToWalkableHeight(new Vector3(pos.x, 0f, pos.z));
+
+        GameObject follower = Instantiate(followerPrefab, pos, Quaternion.identity);
+
+        FollowerUnit unit = follower.GetComponent<FollowerUnit>();
+        if (unit == null)
+            unit = follower.AddComponent<FollowerUnit>();
+
+        int slot = CountFollowersForLeader(leaderTransform);
+        enemyFollowers.Add(follower);
+        unit.SetFollower(FollowerUnit.CrowdTeam.Enemy, leaderTransform, slot);
+
+        if (useTeamTintOnFollowers)
+            SetColor(follower, enemyColor);
+        SetupFollowerAnimator(follower);
+        SetupFollowerPhysics(follower);
+    }
+
+    int CountFollowersForLeader(Transform leaderTransform)
+    {
+        int count = 0;
+        for (int i = 0; i < enemyFollowers.Count; i++)
+        {
+            if (enemyFollowers[i] == null) continue;
+
+            FollowerUnit unit = enemyFollowers[i].GetComponent<FollowerUnit>();
+            if (unit != null && unit.GetLeaderTransform() == leaderTransform)
+                count++;
+        }
+
+        return count;
+    }
+
+    int CountEnemyPowerForLeader(Transform leaderTransform)
+    {
+        return CountFollowersForLeader(leaderTransform) + 1;
+    }
+
+    EnemyLeader GetNearestEnemyLeader(Vector3 fromWorld)
+    {
+        EnemyLeader best = null;
+        float bestSq = float.MaxValue;
+
+        for (int i = 0; i < enemyLeaders.Count; i++)
+        {
+            EnemyLeader el = enemyLeaders[i];
+            if (el == null) continue;
+
+            float sq = (el.transform.position - fromWorld).sqrMagnitude;
+            if (sq < bestSq)
+            {
+                bestSq = sq;
+                best = el;
+            }
+        }
+
+        return best;
+    }
+
+    public Vector3 GetEnemySpawnNearPlayer(float minRadius = 14f, float maxRadius = 24f)
+    {
+        Vector3 center = GetPlayAreaOriginXZ();
+        if (player != null)
+            center = new Vector3(player.position.x, 0f, player.position.z);
+
+        for (int i = 0; i < 16; i++)
+        {
+            float ang = Random.Range(0f, Mathf.PI * 2f);
+            float r = Random.Range(minRadius, maxRadius);
+            Vector3 xz = center + new Vector3(Mathf.Cos(ang) * r, 0f, Mathf.Sin(ang) * r);
+            return SnapToWalkableHeight(xz);
+        }
+
+        return SnapToWalkableHeight(center + Vector3.forward * minRadius);
+    }
+
+    public void PrunePlayerFollowerList()
+    {
+        for (int i = playerFollowers.Count - 1; i >= 0; i--)
+        {
+            if (playerFollowers[i] == null)
+                playerFollowers.RemoveAt(i);
+        }
     }
 
     Vector3 GetRandomPosition()
@@ -541,7 +845,10 @@ public class CrowdManager : MonoBehaviour
 
     public void ConvertToEnemy(GameObject obj)
     {
-        if (obj == null || gameOver || enemyLeader == null) return;
+        if (obj == null || gameOver) return;
+
+        EnemyLeader targetLeader = GetNearestEnemyLeader(obj.transform.position);
+        if (targetLeader == null) return;
 
         FollowerUnit unit = obj.GetComponent<FollowerUnit>();
         if (unit == null) return;
@@ -553,7 +860,10 @@ public class CrowdManager : MonoBehaviour
         if (!enemyFollowers.Contains(obj))
             enemyFollowers.Add(obj);
 
-        unit.SetFollower(FollowerUnit.CrowdTeam.Enemy, enemyLeader.transform, enemyFollowers.Count - 1);
+        unit.SetFollower(
+            FollowerUnit.CrowdTeam.Enemy,
+            targetLeader.transform,
+            CountFollowersForLeader(targetLeader.transform));
 
         if (useTeamTintOnFollowers)
             SetColor(obj, enemyColor);
@@ -565,33 +875,58 @@ public class CrowdManager : MonoBehaviour
         UpdateUI();
     }
 
-    public void ResolveBattle()
+    public void ResolveBattle(EnemyLeader opponent = null)
     {
         if (battleLocked || gameOver || resolvingBattle) return;
 
         resolvingBattle = true;
 
         int playerPower = playerFollowers.Count + 1;
-        int enemyPower = enemyFollowers.Count + 1;
+        Transform opponentRoot = opponent != null ? opponent.transform : enemyLeader != null ? enemyLeader.transform : null;
+        int enemyPower = opponentRoot != null
+            ? CountEnemyPowerForLeader(opponentRoot)
+            : enemyFollowers.Count + Mathf.Max(enemyLeaders.Count, enemyLeader != null ? 1 : 0);
 
         if (playerPower >= enemyPower)
         {
-            List<GameObject> stolenEnemies = new List<GameObject>(enemyFollowers);
-
-            foreach (GameObject enemy in stolenEnemies)
+            if (opponentRoot != null)
             {
-                ConvertToPlayer(enemy);
+                List<GameObject> stolen = new List<GameObject>();
+                for (int i = 0; i < enemyFollowers.Count; i++)
+                {
+                    GameObject go = enemyFollowers[i];
+                    if (go == null) continue;
+
+                    FollowerUnit fu = go.GetComponent<FollowerUnit>();
+                    if (fu != null && fu.GetLeaderTransform() == opponentRoot)
+                        stolen.Add(go);
+                }
+
+                foreach (GameObject enemy in stolen)
+                    ConvertToPlayer(enemy);
+
+                if (opponent != null)
+                {
+                    enemyLeaders.Remove(opponent);
+                    Destroy(opponent.gameObject);
+                }
+            }
+            else
+            {
+                List<GameObject> stolenEnemies = new List<GameObject>(enemyFollowers);
+                foreach (GameObject enemy in stolenEnemies)
+                    ConvertToPlayer(enemy);
+
+                DestroyActiveEnemyCrowd();
             }
 
-            if (enemyLeader != null)
-            {
-                Destroy(enemyLeader.gameObject);
-                enemyLeader = null;
-            }
+            SyncPrimaryEnemyLeader();
+            resolvingBattle = false;
 
-            if (WaveManager.Instance != null)
+            if (useWaveManagerForSpawning && WaveManager.Instance != null)
             {
-                WaveManager.Instance.OnEnemyWaveDefeated();
+                if (enemyLeaders.Count == 0)
+                    WaveManager.Instance.OnEnemyWaveDefeated();
             }
             else
             {
@@ -620,8 +955,10 @@ public class CrowdManager : MonoBehaviour
         battleLocked = false;
     }
 
-    void RefreshPlayerFormation()
+    public void RefreshPlayerFormation()
     {
+        PrunePlayerFollowerList();
+
         for (int i = 0; i < playerFollowers.Count; i++)
         {
             if (playerFollowers[i] == null) continue;
@@ -629,23 +966,55 @@ public class CrowdManager : MonoBehaviour
             FollowerUnit unit = playerFollowers[i].GetComponent<FollowerUnit>();
 
             if (unit != null)
+            {
+                unit.SetFollower(FollowerUnit.CrowdTeam.Player, player, i);
                 unit.SetFollowerIndex(i);
+            }
         }
     }
 
     void RefreshEnemyFormation()
     {
-        if (enemyLeader == null) return;
+        for (int l = 0; l < enemyLeaders.Count; l++)
+        {
+            EnemyLeader el = enemyLeaders[l];
+            if (el == null) continue;
 
+            int index = 0;
+            for (int i = 0; i < enemyFollowers.Count; i++)
+            {
+                if (enemyFollowers[i] == null) continue;
+
+                FollowerUnit unit = enemyFollowers[i].GetComponent<FollowerUnit>();
+                if (unit == null || unit.GetLeaderTransform() != el.transform) continue;
+
+                unit.SetFollowerIndex(index);
+                index++;
+            }
+        }
+    }
+
+    int GetTotalEnemyHeadcount()
+    {
+        int count = enemyLeaders.Count;
         for (int i = 0; i < enemyFollowers.Count; i++)
         {
-            if (enemyFollowers[i] == null) continue;
-
-            FollowerUnit unit = enemyFollowers[i].GetComponent<FollowerUnit>();
-
-            if (unit != null)
-                unit.SetFollowerIndex(i);
+            if (enemyFollowers[i] != null)
+                count++;
         }
+
+        return count;
+    }
+
+    void OnRunTimerExpired()
+    {
+        if (useWaveManagerForSpawning && WaveManager.Instance != null)
+        {
+            WaveManager.Instance.OnWaveSurvived();
+            return;
+        }
+
+        EndGameByScore();
     }
 
     void EndGameByScore()
@@ -664,10 +1033,53 @@ public class CrowdManager : MonoBehaviour
             playerCrowdText.text = "PLAYER CROWD: " + (playerFollowers.Count + 1);
 
         if (enemyCrowdText != null)
-            enemyCrowdText.text = "ENEMY CROWD: " + (enemyFollowers.Count + 1);
+            enemyCrowdText.text = "ENEMY CROWD: " + GetTotalEnemyHeadcount();
 
         if (timerText != null)
             timerText.text = "TIME LEFT: " + Mathf.CeilToInt(timeLeft);
+
+        UpdateWaveEndTimerUI();
+    }
+
+    void EnsureWaveEndTimerText()
+    {
+        if (waveEndTimerText != null || timerText == null)
+            return;
+
+        var go = new GameObject("WaveEndTimer", typeof(RectTransform));
+        go.transform.SetParent(timerText.transform.parent, false);
+
+        RectTransform rt = go.GetComponent<RectTransform>();
+        RectTransform timerRt = timerText.rectTransform;
+        rt.anchorMin = timerRt.anchorMin;
+        rt.anchorMax = timerRt.anchorMax;
+        rt.pivot = timerRt.pivot;
+        rt.anchoredPosition = timerRt.anchoredPosition + new Vector2(0f, -36f);
+        rt.sizeDelta = timerRt.sizeDelta;
+
+        waveEndTimerText = go.AddComponent<TextMeshProUGUI>();
+        waveEndTimerText.font = timerText.font;
+        waveEndTimerText.fontSize = timerText.fontSize;
+        waveEndTimerText.fontStyle = FontStyles.Bold;
+        waveEndTimerText.color = new Color(1f, 0.55f, 0.1f);
+        waveEndTimerText.alignment = TextAlignmentOptions.TopRight;
+        waveEndTimerText.raycastTarget = false;
+        go.SetActive(false);
+    }
+
+    void UpdateWaveEndTimerUI()
+    {
+        if (waveEndTimerText == null)
+            return;
+
+        bool waveMode = useWaveManagerForSpawning && WaveManager.Instance != null;
+        bool show = waveMode && timeLeft > 0f && timeLeft <= waveEndWarningSeconds;
+
+        if (waveEndTimerText.gameObject.activeSelf != show)
+            waveEndTimerText.gameObject.SetActive(show);
+
+        if (show)
+            waveEndTimerText.text = "WAVE ENDS IN: " + Mathf.CeilToInt(timeLeft);
     }
 
     static readonly int BaseColorId = Shader.PropertyToID("_BaseColor"); // URP / Lit
@@ -711,55 +1123,46 @@ public class CrowdManager : MonoBehaviour
             fu.InvalidateAnimatorParameterCache();
     }
 
-    void SetupFollowerPhysics(GameObject obj)
+    public void ConfigureCrowdCharacterPhysics(GameObject obj)
     {
-        Collider col = obj.GetComponent<Collider>();
+        if (obj == null) return;
 
-        if (col == null)
+        foreach (CharacterController cc in obj.GetComponentsInChildren<CharacterController>(true))
+            cc.enabled = false;
+
+        bool hasCollider = false;
+        foreach (Collider col in obj.GetComponentsInChildren<Collider>(true))
+        {
+            if (col == null) continue;
+            col.isTrigger = true;
+            hasCollider = true;
+        }
+
+        if (!hasCollider)
         {
             SphereCollider sphere = obj.AddComponent<SphereCollider>();
             sphere.radius = 0.8f;
             sphere.isTrigger = true;
         }
-        else
-        {
-            col.isTrigger = true;
-        }
 
         Rigidbody rb = obj.GetComponent<Rigidbody>();
-
         if (rb == null)
             rb = obj.AddComponent<Rigidbody>();
 
         rb.useGravity = false;
         rb.isKinematic = true;
         rb.interpolation = RigidbodyInterpolation.None;
+        rb.constraints = RigidbodyConstraints.FreezeRotation;
+    }
+
+    void SetupFollowerPhysics(GameObject obj)
+    {
+        ConfigureCrowdCharacterPhysics(obj);
     }
 
     void SetupLeaderPhysics(GameObject obj)
     {
-        Collider col = obj.GetComponent<Collider>();
-
-        if (col == null)
-        {
-            CapsuleCollider capsule = obj.AddComponent<CapsuleCollider>();
-            capsule.radius = 0.8f;
-            capsule.height = 2f;
-            capsule.isTrigger = true;
-        }
-        else
-        {
-            col.isTrigger = true;
-        }
-
-        Rigidbody rb = obj.GetComponent<Rigidbody>();
-
-        if (rb == null)
-            rb = obj.AddComponent<Rigidbody>();
-
-        rb.useGravity = false;
-        rb.isKinematic = true;
-        rb.interpolation = RigidbodyInterpolation.None;
+        ConfigureCrowdCharacterPhysics(obj);
     }
 
     public void RebuildGameplayFloor()
@@ -787,31 +1190,47 @@ public class CrowdManager : MonoBehaviour
 
         enemyFollowers.Clear();
 
-        if (enemyLeader != null)
+        for (int i = 0; i < enemyLeaders.Count; i++)
         {
-            Destroy(enemyLeader.gameObject);
-            enemyLeader = null;
+            if (enemyLeaders[i] != null)
+                Destroy(enemyLeaders[i].gameObject);
+        }
+
+        enemyLeaders.Clear();
+        enemyLeader = null;
+    }
+
+    public void ApplyWaveModifiersToActiveEnemies()
+    {
+        if (WaveManager.Instance == null) return;
+
+        WaveZone z = WaveManager.Instance.CurrentWaveDefinition;
+        if (z == null) return;
+
+        for (int i = 0; i < enemyLeaders.Count; i++)
+        {
+            EnemyLeader el = enemyLeaders[i];
+            if (el == null) continue;
+
+            el.waveMoveSpeedMultiplier = z.enemyMoveSpeedMultiplier;
+            el.waveChaseSpeedMultiplier = z.enemyChaseSpeedMultiplier;
+            el.waveShockwaveCooldownMultiplier = z.enemyShockwaveCooldownMultiplier;
+            el.activeWaveAbility = z.enemyAbility;
         }
     }
 
     public void ApplyWaveModifiersToActiveEnemy()
     {
-        if (enemyLeader == null || WaveManager.Instance == null)
-            return;
-
-        WaveZone z = WaveManager.Instance.CurrentWaveDefinition;
-        if (z == null) return;
-
-        enemyLeader.waveMoveSpeedMultiplier = z.enemyMoveSpeedMultiplier;
-        enemyLeader.waveChaseSpeedMultiplier = z.enemyChaseSpeedMultiplier;
-        enemyLeader.waveShockwaveCooldownMultiplier = z.enemyShockwaveCooldownMultiplier;
-        enemyLeader.activeWaveAbility = z.enemyAbility;
+        ApplyWaveModifiersToActiveEnemies();
     }
 
     public void SetRunTimerForWave(float seconds)
     {
         gameTime = Mathf.Max(1f, seconds);
         timeLeft = gameTime;
+
+        if (waveEndTimerText != null)
+            waveEndTimerText.gameObject.SetActive(false);
     }
 
     public void SetResolvingBattle(bool value)

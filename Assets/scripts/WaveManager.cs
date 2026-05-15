@@ -26,8 +26,8 @@ public enum EnemyWaveAbility
 
 /// <summary>
 /// Three escalating zones on one map: each wave sets play area, crowd sizes, teleports the player,
-/// and applies numeric modifiers plus optional unique abilities. Clearing the enemy wave advances
-/// to the next zone; after the last wave, the run wins.
+/// and applies numeric modifiers plus optional unique abilities. Clear a wave by defeating the enemy
+/// or surviving until the timer ends; lose only when the enemy wins a crowd battle. After wave 3, win.
 /// </summary>
 [DefaultExecutionOrder(50)]
 public class WaveManager : MonoBehaviour
@@ -42,10 +42,13 @@ public class WaveManager : MonoBehaviour
     [Tooltip("When on, CrowdManager does not spawn neutrals/enemy at Start — this component starts wave 1.")]
     public bool controlCrowdSpawns = true;
 
-    [Tooltip("Seconds after beating an enemy wave before the next zone loads.")]
+    [Tooltip("Seconds after clearing a wave (defeat or survive) before the next zone loads.")]
     public float delayBeforeNextWave = 3f;
 
     [Header("Defaults")]
+    [Tooltip("Each wave: 60s, escalating enemy followers (6 → 10 → 14), and abilities TurboDash/RallyCry/SurgePulse vs Harrier/StubbornSnap/EchoBlast.")]
+    public bool applyStandardWaveProgression = true;
+
     [Tooltip("If every wave still has None for player or enemy ability, assign distinct ones for the first three waves (TurboDash → RallyCry → SurgePulse, Harrier → StubbornSnap → EchoBlast).")]
     public bool autoDistinctAbilitiesWhenUnset = true;
 
@@ -54,6 +57,7 @@ public class WaveManager : MonoBehaviour
 
     int _waveIndex;
     bool _runComplete;
+    bool _waveTransitionPending;
 
     public int CurrentWaveNumber => Mathf.Clamp(_waveIndex + 1, 1, Mathf.Max(1, waves != null ? waves.Length : 1));
     public WaveZone CurrentWaveDefinition => waves != null && _waveIndex >= 0 && _waveIndex < waves.Length ? waves[_waveIndex] : null;
@@ -76,6 +80,9 @@ public class WaveManager : MonoBehaviour
 
         EnsureWaveZoneObjects();
         MaybeApplyDefaultAbilitiesIfUnset();
+
+        if (crowd != null)
+            crowd.ConfigureCityPopulationFromWaveZones(waves);
     }
 
     void EnsureWaveZoneObjects()
@@ -140,10 +147,25 @@ public class WaveManager : MonoBehaviour
         BeginWave(0);
     }
 
+    /// <summary>Enemy leader eliminated — same outcome as surviving the wave timer.</summary>
     public void OnEnemyWaveDefeated()
     {
-        if (_runComplete || crowd == null) return;
+        NotifyWaveCleared();
+    }
 
+    /// <summary>Wave timer reached zero and the player was not beaten in battle.</summary>
+    public void OnWaveSurvived()
+    {
+        NotifyWaveCleared();
+    }
+
+    /// <summary>Defeat the enemy or survive until time runs out to advance.</summary>
+    public void NotifyWaveCleared()
+    {
+        if (_runComplete || _waveTransitionPending || crowd == null) return;
+
+        _waveTransitionPending = true;
+        crowd.MarkGameOver();
         StartCoroutine(CoAdvanceAfterDelay());
     }
 
@@ -156,12 +178,40 @@ public class WaveManager : MonoBehaviour
         if (_waveIndex >= waves.Length)
         {
             _runComplete = true;
-            crowd.MarkGameOver();
             SceneManager.LoadScene("WinScene");
             yield break;
         }
 
+        _waveTransitionPending = false;
         BeginWave(_waveIndex);
+    }
+
+    void ApplyStandardWaveProgression(int index)
+    {
+        if (!applyStandardWaveProgression || waves == null || index < 0 || index >= waves.Length)
+            return;
+
+        WaveZone w = waves[index];
+        if (w == null) return;
+
+        w.waveTimeSeconds = 60f;
+        w.neutralCount = index switch
+        {
+            0 => 45,
+            1 => 55,
+            _ => 65
+        };
+        w.enemyLeaderCount = index switch
+        {
+            0 => 3,
+            1 => 5,
+            _ => 7
+        };
+        w.enemyFollowerCount = 0;
+
+        int abilitySlot = Mathf.Clamp(index + 1, 1, 3);
+        w.playerAbility = (PlayerWaveAbility)abilitySlot;
+        w.enemyAbility = (EnemyWaveAbility)abilitySlot;
     }
 
     void BeginWave(int index)
@@ -169,22 +219,40 @@ public class WaveManager : MonoBehaviour
         _waveIndex = index;
         WaveZone w = waves[_waveIndex];
 
+        ApplyStandardWaveProgression(index);
+
         crowd.ResetRunStateForNewWave();
 
         crowd.playAreaCenter = w.playAreaCenter;
         crowd.spawnRange = w.spawnRange;
         crowd.neutralNPCCount = Mathf.Max(0, w.neutralCount);
-        crowd.enemyStartCount = Mathf.Max(1, w.enemyFollowerCount);
+        crowd.enemyStartCount = Mathf.Max(0, w.enemyFollowerCount);
+        crowd.waveEnemyLeaderCount = Mathf.Max(1, w.enemyLeaderCount);
         crowd.SetRunTimerForWave(w.waveTimeSeconds);
 
         ApplyPlayerModifiers(w);
         TeleportPlayerAndFollowers(w);
+        crowd.PrunePlayerFollowerList();
+        crowd.RefreshPlayerFormation();
         crowd.DestroyNeutralNPCsInScene();
         crowd.DestroyActiveEnemyCrowd();
         crowd.RebuildGameplayFloor();
         crowd.SpawnNeutralNPCs();
         crowd.SpawnEnemyCrowd();
         crowd.UpdateUI();
+
+        ShowWaveAnnouncement();
+    }
+
+    void ShowWaveAnnouncement()
+    {
+        WaveAnnouncementUI ui = WaveAnnouncementUI.GetOrCreate();
+        if (ui == null) return;
+
+        if (crowd != null && crowd.timerText != null)
+            ui.SetReferenceFont(crowd.timerText);
+
+        ui.Show(CurrentWaveNumber);
     }
 
     void ApplyPlayerModifiers(WaveZone w)
@@ -221,6 +289,8 @@ public class WaveManager : MonoBehaviour
 
         crowd.SnapRigidbodyToWalkable(crowd.player);
 
+        crowd.PrunePlayerFollowerList();
+
         for (int i = 0; i < crowd.playerFollowers.Count; i++)
         {
             GameObject go = crowd.playerFollowers[i];
@@ -236,7 +306,13 @@ public class WaveManager : MonoBehaviour
                 go.transform.position = t;
 
             crowd.SnapRigidbodyToWalkable(go.transform);
+
+            FollowerUnit unit = go.GetComponent<FollowerUnit>();
+            if (unit != null)
+                unit.SetFollower(FollowerUnit.CrowdTeam.Player, crowd.player, i);
         }
+
+        crowd.RefreshPlayerFormation();
     }
 }
 
@@ -250,9 +326,12 @@ public class WaveZone
     public Transform playAreaCenter;
 
     [Min(0)] public int neutralCount = 28;
-    [Min(1)] public int enemyFollowerCount = 6;
+
+    [Min(1)] public int enemyLeaderCount = 3;
+
+    [Min(0)] public int enemyFollowerCount = 0;
     public float spawnRange = 45f;
-    [Min(1f)] public float waveTimeSeconds = 90f;
+    [Min(1f)] public float waveTimeSeconds = 60f;
 
     [Header("Player modifiers")]
     [Tooltip("Multiplies move speed for this wave.")]

@@ -63,16 +63,21 @@ public class WaveAnnouncementUI : MonoBehaviour
             _label.font = source.font;
     }
 
-    public void Show(int waveNumber)
+    public void ShowWaveStart(int waveNumber)
+    {
+        ShowMessage("WAVE " + waveNumber);
+    }
+
+    public void ShowMessage(string message, float? holdDuration = null)
     {
         EnsureUI();
-        _label.text = "WAVE " + waveNumber;
+        _label.text = message;
 
         if (_routine != null)
             StopCoroutine(_routine);
 
         gameObject.SetActive(true);
-        _routine = StartCoroutine(CoFadeSequence());
+        _routine = StartCoroutine(CoFadeSequence(holdDuration ?? this.holdDuration));
     }
 
     void EnsureUI()
@@ -101,7 +106,7 @@ public class WaveAnnouncementUI : MonoBehaviour
         _label.text = "WAVE 1";
     }
 
-    IEnumerator CoFadeSequence()
+    IEnumerator CoFadeSequence(float holdSeconds)
     {
         _canvasGroup.alpha = 0f;
 
@@ -110,21 +115,21 @@ public class WaveAnnouncementUI : MonoBehaviour
             float t = 0f;
             while (t < fadeInDuration)
             {
-                t += Time.deltaTime;
+                t += Time.unscaledDeltaTime;
                 _canvasGroup.alpha = Mathf.Clamp01(t / fadeInDuration);
                 yield return null;
             }
         }
 
         _canvasGroup.alpha = 1f;
-        yield return new WaitForSeconds(holdDuration);
+        yield return new WaitForSecondsRealtime(holdSeconds);
 
         if (fadeOutDuration > 0f)
         {
             float t = 0f;
             while (t < fadeOutDuration)
             {
-                t += Time.deltaTime;
+                t += Time.unscaledDeltaTime;
                 _canvasGroup.alpha = 1f - Mathf.Clamp01(t / fadeOutDuration);
                 yield return null;
             }

@@ -993,6 +993,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   gameSceneName: SampleScene
+  teamName: Team CrowD City
 --- !u!1 &1545217157
 GameObject:
   m_ObjectHideFlags: 0
@@ -1050,7 +1051,7 @@ MonoBehaviour:
   m_OnCullStateChanged:
     m_PersistentCalls:
       m_Calls: []
-  m_text: CrowD City
+  m_text: Mob City
   m_isRightToLeft: 0
   m_fontAsset: {fileID: 11400000, guid: ffd98b5be95135545adf596fd11b39e7, type: 2}
   m_sharedMaterial: {fileID: 4343680600397916920, guid: ffd98b5be95135545adf596fd11b39e7, type: 2}

@@ -44,6 +44,13 @@ public class CrowdManager : MonoBehaviour
     [Tooltip("Radius around the wave play area for denser recruitable spawns.")]
     public float neutralNearPlayAreaRadius = 36f;
 
+    [Header("Walled city boundary")]
+    [Tooltip("Keep player, enemies, followers, and spawns inside City Boundary (Wall 1–4).")]
+    public bool clampCrowdsToCityBoundary = true;
+
+    [Tooltip("Auto-resolved from City Boundary in the scene.")]
+    public CityPlayableBounds playableBounds;
+
     [Header("City / walkable play space")]
     [Tooltip("Optional anchor in the city. If unset, the player's XZ at play start defines the spawn/roam center.")]
     public Transform playAreaCenter;
@@ -222,6 +229,7 @@ public class CrowdManager : MonoBehaviour
     {
         if (t == null) return;
 
+        worldPos = ClampToCityBoundary(worldPos, t);
         Vector3 s = SnapToWalkableHeight(new Vector3(worldPos.x, 0f, worldPos.z), t);
         worldPos.y = s.y;
 
@@ -276,10 +284,52 @@ public class CrowdManager : MonoBehaviour
             SpawnEnemyCrowd();
         }
 
+        EnsureCityPlayableBounds();
         EnsureWaveEndTimerText();
         UpdateUI();
 
         CrowdNavMeshMovement.RefreshAvailability();
+    }
+
+    public void EnsureCityPlayableBounds()
+    {
+        if (playableBounds == null)
+            playableBounds = CityPlayableBounds.Instance;
+
+        if (playableBounds != null)
+        {
+            playableBounds.RebuildBounds();
+            return;
+        }
+
+        GameObject boundary = GameObject.Find("City Boundary");
+        if (boundary == null)
+            return;
+
+        playableBounds = boundary.GetComponent<CityPlayableBounds>();
+        if (playableBounds == null)
+            playableBounds = boundary.AddComponent<CityPlayableBounds>();
+
+        playableBounds.RebuildBounds();
+    }
+
+    Vector3 ClampToCityBoundary(Vector3 worldPos, Transform actor = null)
+    {
+        if (!clampCrowdsToCityBoundary)
+            return worldPos;
+
+        EnsureCityPlayableBounds();
+        if (playableBounds == null || !playableBounds.IsValid)
+            return worldPos;
+
+        float inset = 0f;
+        if (actor != null
+            && (actor.GetComponent<PlayerController>() != null || actor.GetComponent<EnemyLeader>() != null))
+        {
+            inset = playableBounds.leaderEdgePadding;
+        }
+
+        return playableBounds.ClampXZ(worldPos, inset);
     }
 
     public Vector3 GetPlayAreaOriginXZ()
@@ -310,6 +360,16 @@ public class CrowdManager : MonoBehaviour
     /// <summary>Fit city pedestrian bounds around all wave districts so neutrals fill the map.</summary>
     public void ConfigureCityPopulationFromWaveZones(WaveZone[] zones, float padding = 40f)
     {
+        EnsureCityPlayableBounds();
+        if (playableBounds != null && playableBounds.IsValid)
+        {
+            Bounds interior = playableBounds.InteriorBounds;
+            _cityPopulationCenterXZ = new Vector3(interior.center.x, 0f, interior.center.z);
+            cityPopulationHalfExtents = new Vector2(interior.extents.x, interior.extents.z);
+            _cityBoundsConfigured = true;
+            return;
+        }
+
         if (zones == null || zones.Length == 0)
             return;
 
@@ -346,15 +406,16 @@ public class CrowdManager : MonoBehaviour
     public bool TryGetRandomCityRoamPoint(out Vector3 worldPos)
     {
         worldPos = default;
-        Vector3 center = GetCityPopulationCenterXZ();
-        Vector2 half = GetCityPopulationHalfExtents();
 
+        EnsureCityPlayableBounds();
         const int maxAttempts = 14;
         for (int i = 0; i < maxAttempts; i++)
         {
-            float x = center.x + Random.Range(-half.x, half.x);
-            float z = center.z + Random.Range(-half.y, half.y);
-            Vector3 candidate = SnapToWalkableHeight(new Vector3(x, 0f, z));
+            Vector3 candidate = playableBounds != null && playableBounds.IsValid
+                ? playableBounds.GetRandomPointXZ()
+                : PickRandomCityXZRaw();
+
+            candidate = SnapToWalkableHeight(candidate);
 
             bool useNav = ShouldConstrainToNavMesh();
             if (!useNav)
@@ -370,8 +431,17 @@ public class CrowdManager : MonoBehaviour
             }
         }
 
-        worldPos = SnapToWalkableHeight(center);
+        worldPos = SnapToWalkableHeight(ClampToCityBoundary(GetCityPopulationCenterXZ()));
         return true;
+    }
+
+    Vector3 PickRandomCityXZRaw()
+    {
+        Vector3 center = GetCityPopulationCenterXZ();
+        Vector2 half = GetCityPopulationHalfExtents();
+        float x = center.x + Random.Range(-half.x, half.x);
+        float z = center.z + Random.Range(-half.y, half.y);
+        return new Vector3(x, 0f, z);
     }
 
     Vector3 GetRandomNeutralSpawnPosition()
@@ -397,11 +467,11 @@ public class CrowdManager : MonoBehaviour
 
     Vector3 PickRandomCityXZ()
     {
-        Vector3 center = GetCityPopulationCenterXZ();
-        Vector2 half = GetCityPopulationHalfExtents();
-        float x = center.x + Random.Range(-half.x, half.x);
-        float z = center.z + Random.Range(-half.y, half.y);
-        return new Vector3(x, 0f, z);
+        EnsureCityPlayableBounds();
+        if (playableBounds != null && playableBounds.IsValid)
+            return playableBounds.GetRandomPointXZ();
+
+        return PickRandomCityXZRaw();
     }
 
     Vector3 PickRandomNearPlayAreaXZ()
@@ -410,7 +480,7 @@ public class CrowdManager : MonoBehaviour
         float radius = neutralNearPlayAreaRadius > 1f ? neutralNearPlayAreaRadius : spawnRange;
         float x = origin.x + Random.Range(-radius, radius);
         float z = origin.z + Random.Range(-radius, radius);
-        return new Vector3(x, 0f, z);
+        return ClampToCityBoundary(new Vector3(x, 0f, z));
     }
 
     float GetReferenceGroundY()
@@ -762,6 +832,14 @@ public class CrowdManager : MonoBehaviour
         return CountFollowersForLeader(leaderTransform) + 1;
     }
 
+    public int GetEnemyPowerForLeader(Transform leaderTransform)
+    {
+        if (leaderTransform == null)
+            return 1;
+
+        return CountEnemyPowerForLeader(leaderTransform);
+    }
+
     EnemyLeader GetNearestEnemyLeader(Vector3 fromWorld)
     {
         EnemyLeader best = null;
@@ -794,10 +872,14 @@ public class CrowdManager : MonoBehaviour
             float ang = Random.Range(0f, Mathf.PI * 2f);
             float r = Random.Range(minRadius, maxRadius);
             Vector3 xz = center + new Vector3(Mathf.Cos(ang) * r, 0f, Mathf.Sin(ang) * r);
+            xz = ClampToCityBoundary(xz);
+            if (playableBounds != null && playableBounds.IsValid && !playableBounds.ContainsXZ(xz))
+                continue;
+
             return SnapToWalkableHeight(xz);
         }
 
-        return SnapToWalkableHeight(center + Vector3.forward * minRadius);
+        return SnapToWalkableHeight(ClampToCityBoundary(center + Vector3.forward * minRadius));
     }
 
     public void PrunePlayerFollowerList()
@@ -811,10 +893,12 @@ public class CrowdManager : MonoBehaviour
 
     Vector3 GetRandomPosition()
     {
-        Vector3 o = GetPlayAreaOriginXZ();
-        float x = o.x + Random.Range(-spawnRange, spawnRange);
-        float z = o.z + Random.Range(-spawnRange, spawnRange);
-        return SnapToWalkableHeight(new Vector3(x, 0f, z));
+        EnsureCityPlayableBounds();
+        Vector3 xz = playableBounds != null && playableBounds.IsValid
+            ? playableBounds.GetRandomPointXZ()
+            : GetPlayAreaOriginXZ() + new Vector3(Random.Range(-spawnRange, spawnRange), 0f, Random.Range(-spawnRange, spawnRange));
+
+        return SnapToWalkableHeight(ClampToCityBoundary(xz));
     }
 
     public void ConvertToPlayer(GameObject obj)

@@ -46,7 +46,7 @@ public class WaveManager : MonoBehaviour
     public float delayBeforeNextWave = 3f;
 
     [Header("Defaults")]
-    [Tooltip("Each wave: 60s, escalating enemy followers (6 → 10 → 14), and abilities TurboDash/RallyCry/SurgePulse vs Harrier/StubbornSnap/EchoBlast.")]
+    [Tooltip("Each wave: 60s, 3/5/7 enemy leaders, 0/1/2 followers per leader, neutrals 45/55/65, and abilities TurboDash/RallyCry/SurgePulse vs Harrier/StubbornSnap/EchoBlast.")]
     public bool applyStandardWaveProgression = true;
 
     [Tooltip("If every wave still has None for player or enemy ability, assign distinct ones for the first three waves (TurboDash → RallyCry → SurgePulse, Harrier → StubbornSnap → EchoBlast).")]
@@ -58,9 +58,11 @@ public class WaveManager : MonoBehaviour
     int _waveIndex;
     bool _runComplete;
     bool _waveTransitionPending;
+    bool _lastClearByDefeatingAllLeaders;
 
     public int CurrentWaveNumber => Mathf.Clamp(_waveIndex + 1, 1, Mathf.Max(1, waves != null ? waves.Length : 1));
     public WaveZone CurrentWaveDefinition => waves != null && _waveIndex >= 0 && _waveIndex < waves.Length ? waves[_waveIndex] : null;
+    public bool IsWaveTransitionPending => _waveTransitionPending;
 
     void Awake()
     {
@@ -82,7 +84,10 @@ public class WaveManager : MonoBehaviour
         MaybeApplyDefaultAbilitiesIfUnset();
 
         if (crowd != null)
+        {
             crowd.ConfigureCityPopulationFromWaveZones(waves);
+            crowd.EnsureCityPlayableBounds();
+        }
     }
 
     void EnsureWaveZoneObjects()
@@ -147,15 +152,17 @@ public class WaveManager : MonoBehaviour
         BeginWave(0);
     }
 
-    /// <summary>Enemy leader eliminated — same outcome as surviving the wave timer.</summary>
+    /// <summary>All enemy leaders eliminated for this wave.</summary>
     public void OnEnemyWaveDefeated()
     {
+        _lastClearByDefeatingAllLeaders = true;
         NotifyWaveCleared();
     }
 
     /// <summary>Wave timer reached zero and the player was not beaten in battle.</summary>
     public void OnWaveSurvived()
     {
+        _lastClearByDefeatingAllLeaders = false;
         NotifyWaveCleared();
     }
 
@@ -166,12 +173,13 @@ public class WaveManager : MonoBehaviour
 
         _waveTransitionPending = true;
         crowd.MarkGameOver();
+        ShowWaveClearedAnnouncement();
         StartCoroutine(CoAdvanceAfterDelay());
     }
 
     IEnumerator CoAdvanceAfterDelay()
     {
-        yield return new WaitForSeconds(delayBeforeNextWave);
+        yield return new WaitForSecondsRealtime(delayBeforeNextWave);
 
         _waveIndex++;
 
@@ -207,7 +215,12 @@ public class WaveManager : MonoBehaviour
             1 => 5,
             _ => 7
         };
-        w.enemyFollowerCount = 0;
+        w.enemyFollowerCount = index switch
+        {
+            0 => 0,
+            1 => 1,
+            _ => 2
+        };
 
         int abilitySlot = Mathf.Clamp(index + 1, 1, 3);
         w.playerAbility = (PlayerWaveAbility)abilitySlot;
@@ -252,7 +265,26 @@ public class WaveManager : MonoBehaviour
         if (crowd != null && crowd.timerText != null)
             ui.SetReferenceFont(crowd.timerText);
 
-        ui.Show(CurrentWaveNumber);
+        ui.ShowWaveStart(CurrentWaveNumber);
+    }
+
+    void ShowWaveClearedAnnouncement()
+    {
+        WaveAnnouncementUI ui = WaveAnnouncementUI.GetOrCreate();
+        if (ui == null) return;
+
+        if (crowd != null && crowd.timerText != null)
+            ui.SetReferenceFont(crowd.timerText);
+
+        bool hasNext = _waveIndex + 1 < waves.Length;
+        string message = _lastClearByDefeatingAllLeaders
+            ? "WAVE CLEARED"
+            : "TIME'S UP";
+
+        if (hasNext)
+            message += "\n<size=55%>Next district...</size>";
+
+        ui.ShowMessage(message, holdDuration: 1.15f);
     }
 
     void ApplyPlayerModifiers(WaveZone w)

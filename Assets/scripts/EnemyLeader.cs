@@ -88,8 +88,14 @@ public class EnemyLeader : MonoBehaviour
     {
         if (CrowdManager.Instance == null) return;
 
+        if (WaveManager.Instance != null && WaveManager.Instance.IsWaveTransitionPending)
+        {
+            UpdateAnimation();
+            return;
+        }
+
         int playerCount = CrowdManager.Instance.playerFollowers.Count + 1;
-        int enemyCount = CrowdManager.Instance.enemyFollowers.Count + 1;
+        int enemyCount = CrowdManager.Instance.GetEnemyPowerForLeader(transform);
 
         bool playerIsStronger = playerCount > enemyCount;
         bool enemyIsAtLeastEqual = enemyCount >= playerCount;

@@ -1,0 +1,17 @@
+fileFormatVersion: 2
+guid: 826ead3abf95f194996cb8156de6f671
+timeCreated: 1518575618
+licenseType: Store
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 2100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 100348
+  packageName: Simple City pack plain
+  packageVersion: 1.0
+  assetPath: Assets/Simple city plain/Material & Texture/Material mesh/SideWay.mat
+  uploadId: 229849

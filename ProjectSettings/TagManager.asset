@@ -6,13 +6,11 @@ TagManager:
   tags:
   - NPC
   - PlayerFollower
-  - EnemyFollower
-  - Enemy
   layers:
   - Default
   - TransparentFX
   - Ignore Raycast
-  - 
+  - WalkableGround
   - Water
   - UI
   - 

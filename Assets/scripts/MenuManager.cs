@@ -3,7 +3,7 @@ using UnityEngine.SceneManagement;
 
 public class MenuManager : MonoBehaviour
 {
-    public string gameSceneName = "Game";
+    public string gameSceneName = "SampleScene";
 
     void Update()
     {

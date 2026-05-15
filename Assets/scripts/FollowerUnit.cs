@@ -39,11 +39,16 @@ public class FollowerUnit : MonoBehaviour
     [Tooltip("Slide along the baked NavMesh when CrowdManager allows it and data exists.")]
     public bool useNavMeshConstraint = true;
 
+    [Header("Obstacle avoidance")]
+    [Tooltip("Uses CrowdManager NavMesh + building blocking while roaming (same as the player crowd).")]
+    public bool useObstacleAvoidance = true;
+
     private Transform leader;
     private int indexInCrowd;
 
     private Vector3 roamTarget;
     private float roamTimer;
+    private float roamStuckTimer;
 
     private float randomOffsetX;
     private float randomOffsetZ;
@@ -52,7 +57,8 @@ public class FollowerUnit : MonoBehaviour
     private Animator _animator;
     private bool _checkedParam;
     private bool _hasIsMoving;
-    private Vector3 _lastXZ;
+    private Vector3 _locomotionPhysSamplePos;
+    private float _smoothPhysLocomotion;
     private Rigidbody _rb;
 
     Vector3 WorldPosition => _rb != null ? _rb.position : transform.position;
@@ -67,7 +73,7 @@ public class FollowerUnit : MonoBehaviour
         MakeRandomOffset();
         SetNewRoamTarget();
         CacheAnimator();
-        _lastXZ = FlattenY(transform.position);
+        _locomotionPhysSamplePos = WorldPosition;
     }
 
     public void SetNeutral()
@@ -76,7 +82,8 @@ public class FollowerUnit : MonoBehaviour
         leader = null;
         indexInCrowd = 0;
         SetNewRoamTarget();
-        _lastXZ = FlattenY(transform.position);
+        _locomotionPhysSamplePos = WorldPosition;
+        _smoothPhysLocomotion = 0f;
     }
 
     public void SetFollower(CrowdTeam newTeam, Transform newLeader, int index)
@@ -85,7 +92,8 @@ public class FollowerUnit : MonoBehaviour
         leader = newLeader;
         indexInCrowd = index;
         MakeRandomOffset();
-        _lastXZ = FlattenY(transform.position);
+        _locomotionPhysSamplePos = WorldPosition;
+        _smoothPhysLocomotion = 0f;
     }
 
     public void SetFollowerIndex(int index)
@@ -131,7 +139,9 @@ public class FollowerUnit : MonoBehaviour
 
         Vector3 next = Vector3.MoveTowards(current, targetPos, maxStep);
 
-        TryNavMeshClamp(current, ref next);
+        if (!(CrowdManager.Instance != null && useObstacleAvoidance))
+            TryNavMeshClamp(current, ref next);
+
         ApplyWorldPosition(next);
 
         Vector3 dir = targetPos - WorldPosition;
@@ -142,6 +152,28 @@ public class FollowerUnit : MonoBehaviour
             Quaternion look = Quaternion.LookRotation(dir.normalized);
             transform.rotation = Quaternion.Lerp(transform.rotation, look, 8f * dt);
         }
+
+        SampleLocomotionSpeedForAnimator(dt);
+    }
+
+    void SampleLocomotionSpeedForAnimator(float physicsDt)
+    {
+        if (!driveLocomotionAnimator)
+            return;
+
+        physicsDt = Mathf.Max(physicsDt, 0.00001f);
+
+        Vector3 now = FlattenY(WorldPosition);
+        Vector3 was = FlattenY(_locomotionPhysSamplePos);
+        float raw = Vector3.Distance(now, was) / physicsDt;
+        _locomotionPhysSamplePos = WorldPosition;
+
+        float blend = raw > 0.065f ? 0.72f : 0.52f;
+        _smoothPhysLocomotion = Mathf.Lerp(_smoothPhysLocomotion, raw, blend);
+
+        // Quick decay when stationary so Idle does not twitch.
+        if (raw < 0.035f && _smoothPhysLocomotion < 0.2f)
+            _smoothPhysLocomotion *= 0.75f;
     }
 
     void LateUpdate()
@@ -177,17 +209,14 @@ public class FollowerUnit : MonoBehaviour
 
     void UpdateLocomotionAnimator()
     {
-        if (!driveLocomotionAnimator) return;
+        if (!driveLocomotionAnimator)
+            return;
 
         CacheAnimator();
-        if (_animator == null || !_hasIsMoving) return;
+        if (_animator == null || !_hasIsMoving)
+            return;
 
-        Vector3 cur = FlattenY(transform.position);
-        float dt = Mathf.Max(Time.deltaTime, 0.0001f);
-        float speed = Vector3.Distance(cur, _lastXZ) / dt;
-        _lastXZ = cur;
-
-        _animator.SetBool("isMoving", speed > idleMoveThreshold);
+        _animator.SetBool("isMoving", _smoothPhysLocomotion > idleMoveThreshold);
     }
 
     static Vector3 FlattenY(Vector3 p)
@@ -241,7 +270,7 @@ public class FollowerUnit : MonoBehaviour
         zOffset += randomOffsetZ + waveZ;
 
         Vector3 leaderPos = leader.position;
-        if (CrowdManager.Instance != null && leader == CrowdManager.Instance.player)
+        if (CrowdManager.Instance != null)
             leaderPos = CrowdManager.Instance.GetActorWorldPosition(leader);
 
         Vector3 back = GetLeaderBackDirection();
@@ -268,23 +297,25 @@ public class FollowerUnit : MonoBehaviour
 
     Vector3 GetLeaderBackDirection()
     {
-        Vector3 back = -leader.forward;
-        back.y = 0f;
+        Vector3 back = Vector3.back;
 
-        if (back.sqrMagnitude < 0.01f)
-            back = Vector3.back;
-
-        if (CrowdManager.Instance != null && leader == CrowdManager.Instance.player)
+        if (leader != null)
         {
             Rigidbody leaderRb = leader.GetComponent<Rigidbody>();
             if (leaderRb != null)
             {
                 Vector3 vel = leaderRb.linearVelocity;
                 vel.y = 0f;
-                if (vel.sqrMagnitude > 0.35f)
-                    back = -vel.normalized;
+                if (vel.sqrMagnitude > 0.25f)
+                    return (-vel.normalized);
             }
+
+            back = -leader.forward;
+            back.y = 0f;
         }
+
+        if (back.sqrMagnitude < 0.01f)
+            back = Vector3.back;
 
         return back.normalized;
     }
@@ -302,13 +333,14 @@ public class FollowerUnit : MonoBehaviour
 
         Vector3 current = WorldPosition;
 
-        if (roamTimer >= roamChangeTime || Vector3.Distance(current, roamTarget) < 1f)
+        if (roamTimer >= roamChangeTime || HorizontalDistance(current, roamTarget) < 1f)
             SetNewRoamTarget();
 
         Vector3 next = Vector3.MoveTowards(current, roamTarget, roamSpeed * dt);
-
-        TryNavMeshClamp(current, ref next);
+        Vector3 beforeMove = WorldPosition;
         ApplyWorldPosition(next);
+        UpdateRoamStuckState(beforeMove, dt);
+        SampleLocomotionSpeedForAnimator(dt);
 
         Vector3 dir = roamTarget - WorldPosition;
         dir.y = 0f;
@@ -320,10 +352,30 @@ public class FollowerUnit : MonoBehaviour
         }
     }
 
+    void UpdateRoamStuckState(Vector3 beforeMove, float dt)
+    {
+        float moved = HorizontalDistance(beforeMove, WorldPosition);
+        float expected = roamSpeed * dt;
+
+        if (moved < expected * 0.12f && HorizontalDistance(WorldPosition, roamTarget) > 2f)
+        {
+            roamStuckTimer += dt;
+            if (roamStuckTimer >= 0.55f)
+            {
+                roamStuckTimer = 0f;
+                SetNewRoamTarget();
+            }
+        }
+        else
+        {
+            roamStuckTimer = 0f;
+        }
+    }
+
     void ApplyWorldPosition(Vector3 worldPos)
     {
-        if (CrowdManager.Instance != null)
-            CrowdManager.Instance.ApplyPositionWithStreetGround(worldPos, transform);
+        if (useObstacleAvoidance && CrowdManager.Instance != null)
+            CrowdManager.Instance.ApplyCrowdMovement(WorldPosition, worldPos, transform);
         else if (_rb != null)
         {
             _rb.position = worldPos;
@@ -336,12 +388,16 @@ public class FollowerUnit : MonoBehaviour
     void SetNewRoamTarget()
     {
         roamTimer = 0f;
+        roamStuckTimer = 0f;
 
-        if (team == CrowdTeam.Neutral && CrowdManager.Instance != null &&
-            CrowdManager.Instance.TryGetRandomCityRoamPoint(out Vector3 cityPoint))
+        if (team == CrowdTeam.Neutral && CrowdManager.Instance != null)
         {
-            roamTarget = cityPoint;
-            return;
+            Vector3 from = WorldPosition;
+            if (CrowdManager.Instance.TryPickReachableRoamPoint(from, transform, out Vector3 reachable))
+            {
+                roamTarget = reachable;
+                return;
+            }
         }
 
         Vector3 center = Vector3.zero;
@@ -355,11 +411,41 @@ public class FollowerUnit : MonoBehaviour
 
         float x = center.x + Random.Range(-range, range);
         float z = center.z + Random.Range(-range, range);
+        Vector3 candidate = new Vector3(x, 0f, z);
 
         if (CrowdManager.Instance != null)
-            roamTarget = CrowdManager.Instance.SnapToWalkableHeight(new Vector3(x, 0f, z));
+        {
+            candidate = CrowdManager.Instance.SnapToWalkableHeight(candidate);
+            if (ShouldConstrainToNavMesh() &&
+                CrowdNavMeshMovement.TrySampleOnNavMesh(
+                    candidate,
+                    CrowdManager.Instance.GetNavMeshSampleRadius() * 2.5f,
+                    CrowdManager.Instance.GetNavMeshAreaMask(),
+                    out Vector3 onMesh))
+            {
+                candidate = onMesh;
+            }
+        }
         else
-            roamTarget = new Vector3(x, transform.position.y, z);
+        {
+            candidate.y = transform.position.y;
+        }
+
+        roamTarget = candidate;
+    }
+
+    bool ShouldConstrainToNavMesh()
+    {
+        return useNavMeshConstraint
+            && CrowdManager.Instance != null
+            && CrowdManager.Instance.ShouldConstrainToNavMesh();
+    }
+
+    static float HorizontalDistance(Vector3 a, Vector3 b)
+    {
+        a.y = 0f;
+        b.y = 0f;
+        return Vector3.Distance(a, b);
     }
 
     void OnTriggerEnter(Collider other)

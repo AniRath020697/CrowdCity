@@ -9,7 +9,7 @@ public class LoseScene : MonoBehaviour
     void Start()
     {
         Time.timeScale = 1f;
-        SceneInputHints.AppendMenuHintToPressSpaceLabels();
+        SceneInputHints.ApplyEndScreenLayout();
     }
 
     void Update()

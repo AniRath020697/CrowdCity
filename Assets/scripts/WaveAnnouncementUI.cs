@@ -85,25 +85,16 @@ public class WaveAnnouncementUI : MonoBehaviour
         if (_label != null)
             return;
 
-        RectTransform rt = GetComponent<RectTransform>();
-        rt.anchorMin = new Vector2(0.5f, 0.5f);
-        rt.anchorMax = new Vector2(0.5f, 0.5f);
-        rt.pivot = new Vector2(0.5f, 0.5f);
-        rt.anchoredPosition = Vector2.zero;
-        rt.sizeDelta = new Vector2(900f, 140f);
-
         _canvasGroup = gameObject.AddComponent<CanvasGroup>();
         _canvasGroup.alpha = 0f;
         _canvasGroup.blocksRaycasts = false;
         _canvasGroup.interactable = false;
 
         _label = gameObject.AddComponent<TextMeshProUGUI>();
-        _label.alignment = TextAlignmentOptions.Center;
-        _label.fontSize = fontSize;
         _label.fontStyle = FontStyles.Bold;
         _label.color = textColor;
-        _label.raycastTarget = false;
         _label.text = "WAVE 1";
+        UiLayout1024x768.ApplyScreenCenter(_label, 900f, fontSize);
     }
 
     IEnumerator CoFadeSequence(float holdSeconds)

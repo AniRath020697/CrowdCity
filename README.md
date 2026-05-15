@@ -14,7 +14,7 @@ CS617 final project — grow your crowd across three districts of one city map.
 2. Open **MainMenu** and press **Play**, or build with **File → Build Settings** (scenes are already listed).
 3. **Main menu:** Space — start game.
 4. **Gameplay:** WASD move. Recruit gray neutrals by touching them. Win a wave by defeating **all enemy leaders** or surviving until the timer ends. Lose if an enemy wins a crowd battle.
-5. **Wave super powers** (one per wave): Wave 1 **Shift** Turbo Dash · Wave 2 **F** Rally Cry · Wave 3 **E** Surge Pulse.
+5. **Wave super powers** (one per wave): Wave 1 **Shift** Turbo Dash · Wave 2 **F** Rally Cry · Wave 3 shockwave echo bonus. **E** shockwave on every wave (**2 uses per wave**). Enemies can shockwave too (**2 uses per leader per wave**).
 6. **Pause:** Escape.
 7. **Win / Lose:** Space — retry · **M** — main menu.
 

@@ -108,10 +108,7 @@ public static class CrowdNavMeshMovement
             return true;
         }
 
-        result = toWorld;
-        if (preserveHeight)
-            result.y = keepY;
-        return true;
+        return false;
     }
 
     static bool IsSampleOnStreet(Vector3 pos, float streetReferenceY, float maxHeightAboveStreet)

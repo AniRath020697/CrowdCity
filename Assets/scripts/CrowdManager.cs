@@ -24,11 +24,22 @@ public class CrowdManager : MonoBehaviour
     [Tooltip("Show wave end warning when this many seconds or less remain in the wave.")]
     public float waveEndWarningSeconds = 10f;
 
+    [Tooltip("Pixels below the top edge for the wave end warning label.")]
+    public float waveEndTimerTopOffset = 56f;
+
     [Header("Game Settings")]
     public float gameTime = 60f;
     public int neutralNPCCount = 40;
-    public int enemyStartCount = 6;
+    [Tooltip("Total enemy followers spawned when a wave starts (WaveManager clamps to 1–2), split across active leaders.")]
+    public int enemyStartCount = 1;
     public float spawnRange = 40f;
+
+    [Header("Enemy wave spawn")]
+    [Tooltip("Enemy leaders spawn at least this far from the player (horizontal metres).")]
+    public float enemyLeaderSpawnMinPlayerDistance = 38f;
+
+    [Tooltip("Avoid stacking leaders on one spot when several spawn in the same frame.")]
+    public float enemyLeaderMinSeparation = 11f;
 
     [Header("City population")]
     [Tooltip("Optional center for city-wide pedestrian spawn/roam. If unset, bounds are derived from wave zones or play area.")]
@@ -100,6 +111,91 @@ public class CrowdManager : MonoBehaviour
     [Tooltip("NavMesh area mask (Walkable only = 1). Does not fix a bad bake, but ignores Not Walkable areas.")]
     public int navMeshAreaMask = 1;
 
+    [Header("Building / obstacle blocking")]
+    [Tooltip("Capsule-cast against building colliders only (trees, lamps, and street props stay passable).")]
+    public bool blockMovementThroughObstacles = true;
+
+    [Tooltip("Horizontal block radius (metres) for player, enemies, and followers.")]
+    public float movementBlockRadius = 0.42f;
+
+    [Tooltip("Capsule height used for obstacle casts (metres).")]
+    public float movementBlockHeight = 1.5f;
+
+    [Tooltip("Layers tested for movement blocking. WalkableGround and crowd colliders are always ignored.")]
+    public LayerMask obstacleLayers = ~0;
+
+    [Tooltip("Adds MeshColliders to city building meshes that have no collider (fixes pass-through on some POLYGON props).")]
+    public bool addMissingBuildingColliders = true;
+
+    [Header("Crowd snag recovery")]
+    [Tooltip("When NavMesh + building clamps cancel almost all of a step, probe sideways arcs so crowds do not stall in tight corners.")]
+    public bool crowdCornerRecovery = true;
+
+    [Tooltip("Only run recovery if the intended planar step was at least this long (metres).")]
+    public float crowdCornerRecoveryIntentMin = 0.055f;
+
+    [Tooltip("Stall ratio: recovered when planar progress is under intent times this.")]
+    public float crowdCornerRecoveryProgressRatioMin = 0.22f;
+
+    [Tooltip("Also stall if planar progress stays under this ceiling for small-intent moves.")]
+    public float crowdCornerRecoveryMaxStallDist = 0.042f;
+
+    [Tooltip("Recovery probe length multiplier applied to attempted step length.")]
+    public float crowdCornerRecoveryStepScale = 0.92f;
+
+    public float crowdCornerRecoveryMinProbe = 0.32f;
+    public float crowdCornerRecoveryMaxProbe = 1.12f;
+
+    [Tooltip("New slide must beat the baseline by at least this (metres) to swap in.")]
+    public float crowdCornerImproveEpsilon = 0.02f;
+
+    [Header("Crowd snag recovery — NavMesh fallback")]
+    [Tooltip("Multiply NavMesh.SamplePosition radius when the normal radius fails so leaders slightly off-mesh can still slide.")]
+    public float crowdNavMeshFromSampleRadiusMul = 4.5f;
+
+    [Tooltip("Minimum wide sample radius after scaling (metres).")]
+    public float crowdNavMeshWideSampleFloor = 4f;
+
+    [Tooltip("If still nearly frozen after angled recovery, take one capsule-only slide (skip NavMesh) so enemies do not deadlock in tight wedges.")]
+    public bool crowdObstacleOnlyBypassWhenNearlyStuck = true;
+
+    [Tooltip("Bypass only when intended step length is above this.")]
+    public float crowdObstacleBypassIntentMin = 0.06f;
+
+    [Tooltip("Planar progress shorter than this after recovery counts as frozen.")]
+    public float crowdNearlyStuckDistance = 0.028f;
+
+    [Tooltip("Obstacle-only escape probe length clamps.")]
+    public float crowdObstacleBypassMinStep = 0.38f;
+    public float crowdObstacleBypassMaxStep = 1.45f;
+
+    [Header("Crowd perf")]
+    [Tooltip("Player/enemy follower units skip NavMesh slide and multi-pass snag rescue (cheap obstacle-only step). Huge win when recruited crowds get large.")]
+    public bool lightweightRecruitedFollowerCrowd = true;
+
+    [Header("Outer wall visibility")]
+    [Tooltip("Clamp camera, spawn backdrop panels, and enable soft fog so void past the city walls is hidden.")]
+    public bool limitViewBeyondCityWalls = true;
+
+    [Header("Audio")]
+    [Tooltip("Played when the player or an enemy leader uses shockwave (E / AI).")]
+    public AudioClip shockwaveExplosionClip;
+
+    [Range(0f, 1f)]
+    public float shockwaveExplosionVolume = 0.9f;
+
+    [Tooltip("Played when the player uses Turbo Dash (Left Shift).")]
+    public AudioClip dashWhooshClip;
+
+    [Range(0f, 1f)]
+    public float dashWhooshVolume = 0.85f;
+
+    [Tooltip("Played when the player uses Rally Cry (F).")]
+    public AudioClip rallyCryPullClip;
+
+    [Range(0f, 1f)]
+    public float rallyCryPullVolume = 0.9f;
+
     [Tooltip("Use play area / street height for ground rays and NavMesh checks so crowds stay on sidewalks, not roofs or lamp tops.")]
     public bool usePlayAreaStreetHeight = true;
 
@@ -141,6 +237,7 @@ public class CrowdManager : MonoBehaviour
     private GameObject _runtimeGameplayFloor;
     private Vector3 _cityPopulationCenterXZ;
     private bool _cityBoundsConfigured;
+    private int _lastTimerLayoutValue = -1;
 
     void Awake()
     {
@@ -150,7 +247,55 @@ public class CrowdManager : MonoBehaviour
             return;
         }
         Instance = this;
+
+        if (GetComponent<GameplayHudLayoutBootstrap>() == null)
+            gameObject.AddComponent<GameplayHudLayoutBootstrap>();
+
+        RegisterShockwaveAudio();
     }
+
+    void RegisterShockwaveAudio()
+    {
+        if (shockwaveExplosionClip != null)
+            ShockwaveSfx.SetClip(shockwaveExplosionClip);
+
+        ShockwaveSfx.Volume = shockwaveExplosionVolume;
+
+        if (dashWhooshClip != null)
+            DashSfx.SetClip(dashWhooshClip);
+
+        DashSfx.Volume = dashWhooshVolume;
+
+        if (rallyCryPullClip != null)
+            RallyCrySfx.SetClip(rallyCryPullClip);
+
+        RallyCrySfx.Volume = rallyCryPullVolume;
+    }
+
+#if UNITY_EDITOR
+    void OnValidate()
+    {
+        if (shockwaveExplosionClip == null)
+        {
+            shockwaveExplosionClip = UnityEditor.AssetDatabase.LoadAssetAtPath<AudioClip>(
+                "Assets/Audio Effects/Explosion.wav");
+        }
+
+        if (dashWhooshClip == null)
+        {
+            dashWhooshClip = UnityEditor.AssetDatabase.LoadAssetAtPath<AudioClip>(
+                "Assets/Audio Effects/whoosh.mp3");
+        }
+
+        if (rallyCryPullClip == null)
+        {
+            rallyCryPullClip = UnityEditor.AssetDatabase.LoadAssetAtPath<AudioClip>(
+                "Assets/Audio Effects/Pulling.mp3");
+        }
+
+        RegisterShockwaveAudio();
+    }
+#endif
 
     public bool ShouldConstrainToNavMesh()
     {
@@ -185,15 +330,310 @@ public class CrowdManager : MonoBehaviour
     public bool TryCrowdNavMove(Vector3 fromWorld, Vector3 toWorld, out Vector3 result, bool preserveHeight = true)
     {
         float streetY = usePlayAreaStreetHeight ? GetStreetReferenceY() : float.NaN;
+        float radius = GetNavMeshSampleRadius();
+
+        if (CrowdNavMeshMovement.TryMove(
+                fromWorld,
+                toWorld,
+                radius,
+                out result,
+                preserveHeight,
+                streetY,
+                navMeshMaxHeightAboveStreet,
+                GetNavMeshAreaMask()))
+            return true;
+
+        float wide = Mathf.Max(
+            radius * Mathf.Max(1.01f, crowdNavMeshFromSampleRadiusMul),
+            Mathf.Max(radius + 0.25f, crowdNavMeshWideSampleFloor));
+
+        if (wide <= radius + 0.004f)
+            return false;
+
         return CrowdNavMeshMovement.TryMove(
             fromWorld,
             toWorld,
-            GetNavMeshSampleRadius(),
+            wide,
             out result,
             preserveHeight,
             streetY,
             navMeshMaxHeightAboveStreet,
             GetNavMeshAreaMask());
+    }
+
+    /// <summary>NavMesh slide (optional) then building capsule block, then street snap + city clamp.</summary>
+    public void ApplyCrowdMovement(Vector3 fromWorld, Vector3 toWorld, Transform actor)
+    {
+        if (actor == null)
+            return;
+
+        ResolveCrowdMove(fromWorld, toWorld, actor, out Vector3 resolved);
+        ApplyPositionWithStreetGround(resolved, actor);
+    }
+
+    public void ResolveCrowdMove(Vector3 fromWorld, Vector3 toWorld, Transform actor, out Vector3 resolved)
+    {
+        resolved = ProjectileCrowdSlide(fromWorld, toWorld, actor);
+
+        if (lightweightRecruitedFollowerCrowd && IsRecruitedFollowerMovement(actor))
+            return;
+
+        float intent = HorizontalDistance(fromWorld, toWorld);
+
+        float improveEps = Mathf.Max(0.005f, crowdCornerImproveEpsilon);
+        float ratioMin = Mathf.Clamp(crowdCornerRecoveryProgressRatioMin, 0.05f, 0.95f);
+        float stallCeil = Mathf.Max(0.015f, crowdCornerRecoveryMaxStallDist);
+        float intentMinRecover = Mathf.Max(0.02f, crowdCornerRecoveryIntentMin);
+
+        if (crowdCornerRecovery && actor != null
+            && intent >= intentMinRecover)
+        {
+            float achievedCorner = HorizontalDistance(fromWorld, resolved);
+            float accept = Mathf.Min(stallCeil, intent * ratioMin);
+            if (achievedCorner <= accept
+                && TryPickBetterCrowdSlide(fromWorld, toWorld, actor, intent, resolved, improveEps, out Vector3 better))
+            {
+                resolved = better;
+            }
+        }
+
+        float bypassIntent = Mathf.Max(0.04f, crowdObstacleBypassIntentMin);
+        float nearly = Mathf.Max(0.018f, crowdNearlyStuckDistance);
+        float achievedFinal = HorizontalDistance(fromWorld, resolved);
+        float relativeProgress = intent > 0.001f ? achievedFinal / Mathf.Max(0.001f, intent) : 1f;
+        bool crawlStall = intent >= bypassIntent && relativeProgress < 0.14f && achievedFinal < 0.068f;
+
+        if (crowdObstacleOnlyBypassWhenNearlyStuck
+            && actor != null
+            && blockMovementThroughObstacles
+            && intent >= bypassIntent
+            && (achievedFinal <= nearly || crawlStall)
+            && TryObstacleOnlyEscape(fromWorld, toWorld, actor, intent, resolved, out Vector3 brute))
+        {
+            resolved = brute;
+        }
+    }
+
+    /// <summary>
+    /// Player/enemy followers: skip NavMesh + heavy snag recovery (packed formations look like crawl-stalls and burn CPU).
+    /// </summary>
+    static bool IsRecruitedFollowerMovement(Transform actor)
+    {
+        if (actor == null)
+            return false;
+
+        FollowerUnit fu = actor.GetComponent<FollowerUnit>();
+        return fu != null && fu.team != FollowerUnit.CrowdTeam.Neutral;
+    }
+
+    /// <summary>
+    /// NavMesh slide (optional) plus building capsule block. No snag recovery (used for probe candidates).
+    /// </summary>
+    Vector3 ProjectileCrowdSlide(Vector3 fromWorld, Vector3 toWorld, Transform actor)
+    {
+        Vector3 resolved = toWorld;
+
+        bool recruitFollower = lightweightRecruitedFollowerCrowd && IsRecruitedFollowerMovement(actor);
+
+        if (!recruitFollower
+            && ShouldConstrainToNavMesh()
+            && TryCrowdNavMove(fromWorld, resolved, out Vector3 navPos))
+        {
+            resolved = navPos;
+        }
+
+        if (blockMovementThroughObstacles)
+        {
+            CrowdObstacleMovement.TryBlockHorizontalMove(
+                fromWorld,
+                resolved,
+                movementBlockRadius,
+                movementBlockHeight,
+                obstacleLayers,
+                actor,
+                out Vector3 blocked);
+            resolved = blocked;
+        }
+
+        return resolved;
+    }
+
+    Vector3 ProjectileObstacleOnly(Vector3 fromWorld, Vector3 toWorld, Transform actor)
+    {
+        Vector3 resolved = toWorld;
+
+        if (blockMovementThroughObstacles)
+        {
+            CrowdObstacleMovement.TryBlockHorizontalMove(
+                fromWorld,
+                resolved,
+                movementBlockRadius,
+                movementBlockHeight,
+                obstacleLayers,
+                actor,
+                out Vector3 blocked);
+            resolved = blocked;
+        }
+
+        return resolved;
+    }
+
+    bool TryObstacleOnlyEscape(
+        Vector3 fromWorld,
+        Vector3 desiredWorld,
+        Transform actor,
+        float intent,
+        Vector3 baselineResolved,
+        out Vector3 chosen)
+    {
+        chosen = baselineResolved;
+
+        Vector3 dv = desiredWorld - fromWorld;
+        dv.y = 0f;
+        float dLen = dv.magnitude;
+        if (dLen < 0.0001f)
+            return false;
+
+        Vector3 fwd = dv / dLen;
+        float baseProg = HorizontalDistance(fromWorld, baselineResolved);
+
+        float step = Mathf.Clamp(
+            intent * 0.62f,
+            Mathf.Max(0.12f, crowdObstacleBypassMinStep),
+            crowdObstacleBypassMaxStep);
+
+        float bestProg = baseProg;
+        Vector3 bestResolved = baselineResolved;
+
+        const float yawSamplesDeg = 15f;
+
+        for (int i = -8; i <= 8; i++)
+        {
+            if (i == 0)
+                continue;
+
+            Quaternion q = Quaternion.Euler(0f, i * yawSamplesDeg, 0f);
+            Vector3 dir = q * fwd;
+            Vector3 probeTo = fromWorld + dir * step;
+            Vector3 slid = ProjectileObstacleOnly(fromWorld, probeTo, actor);
+            float p = HorizontalDistance(fromWorld, slid);
+            if (p > bestProg)
+            {
+                bestProg = p;
+                bestResolved = slid;
+            }
+        }
+
+        Vector3 perp = new Vector3(-fwd.z, 0f, fwd.x);
+        for (float bias = -1f; bias <= 1f; bias += 2f)
+        {
+            Vector3 side = (perp * 0.94f + fwd * 0.12f * bias).normalized;
+            Vector3 probeTo = fromWorld + side * (step * 0.92f);
+            Vector3 slid = ProjectileObstacleOnly(fromWorld, probeTo, actor);
+            float p = HorizontalDistance(fromWorld, slid);
+            if (p > bestProg)
+            {
+                bestProg = p;
+                bestResolved = slid;
+            }
+        }
+
+        const float obstacleEscapeGain = 0.028f;
+
+        if (bestProg <= baseProg + Mathf.Max(obstacleEscapeGain, intent * 0.07f))
+            return false;
+
+        chosen = bestResolved;
+        return true;
+    }
+
+    bool TryPickBetterCrowdSlide(
+        Vector3 fromWorld,
+        Vector3 toWorld,
+        Transform actor,
+        float intent,
+        Vector3 baselineResolved,
+        float improveEpsilon,
+        out Vector3 chosen)
+    {
+        chosen = baselineResolved;
+
+        Vector3 dv = toWorld - fromWorld;
+        dv.y = 0f;
+        float dLen = dv.magnitude;
+        if (dLen < 0.0001f)
+            return false;
+
+        Vector3 fwd = dv / dLen;
+        float baseProg = HorizontalDistance(fromWorld, baselineResolved);
+
+        float scale = Mathf.Clamp(crowdCornerRecoveryStepScale, 0.2f, 1.5f);
+        float probe = Mathf.Clamp(intent * scale, crowdCornerRecoveryMinProbe, crowdCornerRecoveryMaxProbe);
+
+        const float yawSamplesDeg = 12f;
+        float bestProg = baseProg;
+        Vector3 bestResolved = baselineResolved;
+
+        for (int i = -6; i <= 6; i++)
+        {
+            if (i == 0)
+                continue;
+
+            Quaternion q = Quaternion.Euler(0f, i * yawSamplesDeg, 0f);
+            Vector3 dir = q * fwd;
+            Vector3 probeTo = fromWorld + dir * probe;
+            Vector3 slid = ProjectileCrowdSlide(fromWorld, probeTo, actor);
+            float p = HorizontalDistance(fromWorld, slid);
+            if (p > bestProg)
+            {
+                bestProg = p;
+                bestResolved = slid;
+            }
+        }
+
+        // Extra wide sides (scrape along facades)
+        Vector3 perp = new Vector3(-fwd.z, 0f, fwd.x);
+        for (float s = -1f; s <= 1f; s += 2f)
+        {
+            Vector3 side = (fwd * 0.18f + perp * s).normalized;
+            Vector3 probeTo = fromWorld + side * (probe * 0.88f);
+            Vector3 slid = ProjectileCrowdSlide(fromWorld, probeTo, actor);
+            float p = HorizontalDistance(fromWorld, slid);
+            if (p > bestProg)
+            {
+                bestProg = p;
+                bestResolved = slid;
+            }
+        }
+
+        if (bestProg <= baseProg + improveEpsilon)
+            return false;
+
+        chosen = bestResolved;
+        return true;
+    }
+
+    public static bool ShouldIgnoreForMovementBlock(Collider col, Transform ignoreRoot)
+    {
+        if (col == null)
+            return true;
+        if (IsCrowdCharacterCollider(col))
+            return true;
+        if (IsRuntimeGameplayFloorCollider(col))
+            return true;
+        if (ignoreRoot != null && (col.transform == ignoreRoot || col.transform.IsChildOf(ignoreRoot)))
+            return true;
+
+        int walkable = LayerMask.NameToLayer("WalkableGround");
+        if (walkable >= 0 && col.gameObject.layer == walkable)
+            return true;
+
+        int ignoreRaycast = LayerMask.NameToLayer("Ignore Raycast");
+        if (ignoreRaycast >= 0 && col.gameObject.layer == ignoreRaycast)
+            return true;
+
+        // Only buildings and the outer city walls block — trees, lamps, and props pass through.
+        return !CrowdEnvironmentClassification.BlocksCrowdMovement(col);
     }
 
     public Vector3 GetActorWorldPosition(Transform t)
@@ -220,7 +660,7 @@ public class CrowdManager : MonoBehaviour
             Vector3 from = followerRb != null ? followerRb.position : t.position;
             Vector3 to = from + worldDelta;
 
-            ApplyPositionWithStreetGround(to, t);
+            ApplyCrowdMovement(from, to, t);
         }
     }
 
@@ -259,6 +699,7 @@ public class CrowdManager : MonoBehaviour
 
     void Start()
     {
+        RegisterShockwaveAudio();
         timeLeft = gameTime;
 
         FreezeEnvironmentRigidbodies();
@@ -285,10 +726,44 @@ public class CrowdManager : MonoBehaviour
         }
 
         EnsureCityPlayableBounds();
+        if (addMissingBuildingColliders)
+            EnsureMissingBuildingColliders();
+        if (limitViewBeyondCityWalls)
+            CityBoundaryViewLimiter.Ensure(player);
         EnsureWaveEndTimerText();
+        ApplyHudLayoutFor1024x768();
         UpdateUI();
 
         CrowdNavMeshMovement.RefreshAvailability();
+    }
+
+    void EnsureMissingBuildingColliders()
+    {
+        Transform root = environmentPhysicsRoot != null
+            ? environmentPhysicsRoot
+            : GameObject.Find("City")?.transform;
+
+        if (root == null)
+            return;
+
+        MeshFilter[] filters = root.GetComponentsInChildren<MeshFilter>(true);
+        for (int i = 0; i < filters.Length; i++)
+        {
+            MeshFilter mf = filters[i];
+            if (mf == null || mf.sharedMesh == null)
+                continue;
+
+            Transform t = mf.transform;
+            if (!CrowdEnvironmentClassification.ShouldReceiveBuildingCollider(t))
+                continue;
+
+            if (t.GetComponent<Collider>() != null)
+                continue;
+
+            MeshCollider meshCollider = t.gameObject.AddComponent<MeshCollider>();
+            meshCollider.sharedMesh = mf.sharedMesh;
+            meshCollider.convex = false;
+        }
     }
 
     public void EnsureCityPlayableBounds()
@@ -435,6 +910,53 @@ public class CrowdManager : MonoBehaviour
         return true;
     }
 
+    /// <summary>Picks a roam point neutrals can reach without cutting through buildings.</summary>
+    public bool TryPickReachableRoamPoint(Vector3 fromWorld, Transform actor, out Vector3 roamPoint)
+    {
+        roamPoint = default;
+        if (actor == null)
+            return false;
+
+        const int maxAttempts = 16;
+        float minProgress = 0.42f;
+
+        for (int i = 0; i < maxAttempts; i++)
+        {
+            if (!TryGetRandomCityRoamPoint(out Vector3 candidate))
+                continue;
+
+            candidate.y = fromWorld.y;
+
+            float desired = HorizontalDistance(fromWorld, candidate);
+            if (desired < 2f)
+                continue;
+
+            ResolveCrowdMove(fromWorld, candidate, actor, out Vector3 resolved);
+            float traveled = HorizontalDistance(fromWorld, resolved);
+
+            if (traveled >= desired * minProgress)
+            {
+                roamPoint = candidate;
+                return true;
+            }
+        }
+
+        if (TryGetRandomCityRoamPoint(out Vector3 fallback))
+        {
+            roamPoint = fallback;
+            return true;
+        }
+
+        return false;
+    }
+
+    static float HorizontalDistance(Vector3 a, Vector3 b)
+    {
+        a.y = 0f;
+        b.y = 0f;
+        return Vector3.Distance(a, b);
+    }
+
     Vector3 PickRandomCityXZRaw()
     {
         Vector3 center = GetCityPopulationCenterXZ();
@@ -506,12 +1028,12 @@ public class CrowdManager : MonoBehaviour
         return GetReferenceGroundY();
     }
 
-    static bool IsRuntimeGameplayFloorCollider(Collider c)
+    public static bool IsRuntimeGameplayFloorCollider(Collider c)
     {
         return c != null && c.gameObject.name == "CrowdGameplayFloor";
     }
 
-    static bool IsCrowdCharacterCollider(Collider c)
+    public static bool IsCrowdCharacterCollider(Collider c)
     {
         if (c == null) return true;
         if (c.GetComponentInParent<PlayerController>() != null) return true;
@@ -644,6 +1166,16 @@ public class CrowdManager : MonoBehaviour
         if (TryEnvironmentRayHitDown(worldXZ, out RaycastHit hit, heightReference))
             return new Vector3(worldXZ.x, hit.point.y + characterFeetOffset, worldXZ.z);
 
+        if (ShouldConstrainToNavMesh()
+            && CrowdNavMeshMovement.TrySampleOnNavMesh(
+                worldXZ,
+                GetNavMeshSampleRadius() * 2.5f,
+                GetNavMeshAreaMask(),
+                out Vector3 onMesh))
+        {
+            return new Vector3(worldXZ.x, onMesh.y + characterFeetOffset, worldXZ.z);
+        }
+
         if (playAreaCenter != null)
             return new Vector3(worldXZ.x, playAreaCenter.position.y + characterFeetOffset, worldXZ.z);
 
@@ -666,6 +1198,57 @@ public class CrowdManager : MonoBehaviour
             rb.position = p;
         else
             t.position = p;
+    }
+
+    /// <summary>Places the player (or any crowd actor) at a wave spawn with city clamp + street snap.</summary>
+    public void PlaceActorAtWaveSpawn(Transform actor, Transform spawnPoint)
+    {
+        if (actor == null || spawnPoint == null)
+            return;
+
+        actor.gameObject.SetActive(true);
+
+        Vector3 worldPos = spawnPoint.position;
+        worldPos = ClampToCityBoundary(worldPos, actor);
+
+        Rigidbody rb = actor.GetComponent<Rigidbody>();
+        if (rb != null)
+            rb.rotation = spawnPoint.rotation;
+        else
+            actor.rotation = spawnPoint.rotation;
+
+        ApplyPositionWithStreetGround(worldPos, actor);
+    }
+
+    public void EnsurePlayerVisibleAndGrounded()
+    {
+        if (player == null)
+            return;
+
+        player.gameObject.SetActive(true);
+
+        foreach (Renderer renderer in player.GetComponentsInChildren<Renderer>(true))
+        {
+            if (renderer != null)
+                renderer.enabled = true;
+        }
+
+        ApplyPositionWithStreetGround(player.position, player);
+    }
+
+    public void ResnapPlayerCrowdToGround()
+    {
+        EnsurePlayerVisibleAndGrounded();
+
+        for (int i = 0; i < playerFollowers.Count; i++)
+        {
+            GameObject go = playerFollowers[i];
+            if (go == null)
+                continue;
+
+            go.SetActive(true);
+            ApplyPositionWithStreetGround(go.transform.position, go.transform);
+        }
     }
 
     void Update()
@@ -706,11 +1289,26 @@ public class CrowdManager : MonoBehaviour
         if (useWaveManagerForSpawning)
         {
             int leaders = waveEnemyLeaderCount > 0 ? waveEnemyLeaderCount : 1;
-            SpawnWaveEnemyLeaders(leaders, spawnOneEnemyNearPlayer: true);
+            SpawnWaveEnemyLeaders(leaders);
             return;
         }
 
         SpawnClassicEnemyCrowd();
+    }
+
+    void SpawnStartingEnemyFollowersAcrossLeaders()
+    {
+        int total = Mathf.Clamp(enemyStartCount, 0, 2);
+        if (total <= 0 || enemyLeaders.Count == 0)
+            return;
+
+        for (int f = 0; f < total; f++)
+        {
+            EnemyLeader leader = enemyLeaders[f % enemyLeaders.Count];
+            if (leader == null) continue;
+
+            SpawnEnemyFollowerForLeader(leader.transform, leader.transform.position);
+        }
     }
 
     void SpawnClassicEnemyCrowd()
@@ -730,8 +1328,7 @@ public class CrowdManager : MonoBehaviour
         SetupLeaderPhysics(enemyObj);
         SetColor(enemyObj, enemyColor);
 
-        for (int i = 0; i < enemyStartCount; i++)
-            SpawnEnemyFollowerForLeader(leader.transform, enemyObj.transform.position);
+        SpawnStartingEnemyFollowersAcrossLeaders();
 
         RefreshEnemyFormation();
         ApplyWaveModifiersToActiveEnemies();
@@ -740,7 +1337,7 @@ public class CrowdManager : MonoBehaviour
 
     [HideInInspector] public int waveEnemyLeaderCount = 3;
 
-    public void SpawnWaveEnemyLeaders(int leaderCount, bool spawnOneEnemyNearPlayer)
+    public void SpawnWaveEnemyLeaders(int leaderCount)
     {
         resolvingBattle = false;
 
@@ -749,11 +1346,11 @@ public class CrowdManager : MonoBehaviour
 
         DestroyActiveEnemyCrowd();
 
+        List<Vector3> placedXZ = new List<Vector3>(leaderCount);
+
         for (int i = 0; i < leaderCount; i++)
         {
-            Vector3 pos = i == 0 && spawnOneEnemyNearPlayer
-                ? GetEnemySpawnNearPlayer()
-                : GetRandomNeutralSpawnPosition();
+            Vector3 pos = GetEnemySpawnAwayFromPlayer(placedXZ);
 
             GameObject enemyObj = Instantiate(enemyLeaderPrefab, pos, Quaternion.identity);
             EnemyLeader leader = RegisterEnemyLeader(enemyObj);
@@ -761,12 +1358,14 @@ public class CrowdManager : MonoBehaviour
 
             leader.wanderRange = Mathf.Max(spawnRange, 120f);
             leader.alwaysHuntPlayer = true;
+            leader.useProximityHunt = true;
             SetupLeaderPhysics(enemyObj);
             SetColor(enemyObj, enemyColor);
 
-            for (int f = 0; f < enemyStartCount; f++)
-                SpawnEnemyFollowerForLeader(leader.transform, pos);
+            placedXZ.Add(new Vector3(pos.x, 0f, pos.z));
         }
+
+        SpawnStartingEnemyFollowersAcrossLeaders();
 
         SyncPrimaryEnemyLeader();
         RefreshEnemyFormation();
@@ -788,6 +1387,12 @@ public class CrowdManager : MonoBehaviour
 
     void SyncPrimaryEnemyLeader()
     {
+        for (int i = enemyLeaders.Count - 1; i >= 0; i--)
+        {
+            if (enemyLeaders[i] == null)
+                enemyLeaders.RemoveAt(i);
+        }
+
         enemyLeader = enemyLeaders.Count > 0 ? enemyLeaders[0] : null;
     }
 
@@ -861,6 +1466,100 @@ public class CrowdManager : MonoBehaviour
         return best;
     }
 
+    /// <summary>
+    /// Picks a walkable spawn for an enemy leader, far from the player (and optionally far from other leader XZ used this frame).
+    /// </summary>
+    public Vector3 GetEnemySpawnAwayFromPlayer(List<Vector3> otherLeaderXZ = null)
+    {
+        float minFromPlayer = Mathf.Max(12f, enemyLeaderSpawnMinPlayerDistance);
+        float minFromPlayerSq = minFromPlayer * minFromPlayer;
+
+        float minAlly = Mathf.Max(2.5f, enemyLeaderMinSeparation);
+        float minAllySq = minAlly * minAlly;
+
+        Vector3 playerXZ = Vector3.zero;
+        bool hasPlayer = player != null;
+        if (hasPlayer)
+        {
+            Vector3 ap = GetActorWorldPosition(player);
+            playerXZ = new Vector3(ap.x, 0f, ap.z);
+        }
+
+        const int maxAttempts = 40;
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            Vector3 candidate = GetRandomNeutralSpawnPosition();
+            Vector3 q = new Vector3(candidate.x, 0f, candidate.z);
+
+            if (hasPlayer && (q - playerXZ).sqrMagnitude < minFromPlayerSq)
+                continue;
+
+            if (otherLeaderXZ != null)
+            {
+                bool tooClose = false;
+                for (int j = 0; j < otherLeaderXZ.Count; j++)
+                {
+                    if ((q - otherLeaderXZ[j]).sqrMagnitude < minAllySq)
+                    {
+                        tooClose = true;
+                        break;
+                    }
+                }
+
+                if (tooClose)
+                    continue;
+            }
+
+            return candidate;
+        }
+
+        return GetEnemySpawnRadialFallback(playerXZ, hasPlayer, minFromPlayer, otherLeaderXZ, minAllySq);
+    }
+
+    Vector3 GetEnemySpawnRadialFallback(
+        Vector3 playerXZ,
+        bool hasPlayer,
+        float minRadius,
+        List<Vector3> otherLeaderXZ,
+        float minAllySq)
+    {
+        Vector3 origin = hasPlayer ? playerXZ : GetPlayAreaOriginXZ();
+
+        for (int i = 0; i < 28; i++)
+        {
+            float ang = Random.Range(0f, Mathf.PI * 2f);
+            float r = minRadius + Random.Range(0f, Mathf.Max(spawnRange, 45f));
+            Vector3 xz = origin + new Vector3(Mathf.Cos(ang) * r, 0f, Mathf.Sin(ang) * r);
+            xz = ClampToCityBoundary(xz);
+            Vector3 placed = SnapToWalkableHeight(new Vector3(xz.x, 0f, xz.z));
+            Vector3 q = new Vector3(placed.x, 0f, placed.z);
+
+            if (hasPlayer && (q - playerXZ).sqrMagnitude < minRadius * minRadius * 0.81f)
+                continue;
+
+            if (otherLeaderXZ != null)
+            {
+                bool bad = false;
+                for (int j = 0; j < otherLeaderXZ.Count; j++)
+                {
+                    if ((q - otherLeaderXZ[j]).sqrMagnitude < minAllySq)
+                    {
+                        bad = true;
+                        break;
+                    }
+                }
+
+                if (bad)
+                    continue;
+            }
+
+            return placed;
+        }
+
+        Vector3 last = SnapToWalkableHeight(ClampToCityBoundary(origin + Vector3.forward * minRadius));
+        return last;
+    }
+
     public Vector3 GetEnemySpawnNearPlayer(float minRadius = 14f, float maxRadius = 24f)
     {
         Vector3 center = GetPlayAreaOriginXZ();
@@ -910,6 +1609,7 @@ public class CrowdManager : MonoBehaviour
 
         if (unit.team == FollowerUnit.CrowdTeam.Player) return;
 
+        bool wasEnemy = unit.team == FollowerUnit.CrowdTeam.Enemy;
         enemyFollowers.Remove(obj);
 
         if (!playerFollowers.Contains(obj))
@@ -917,7 +1617,7 @@ public class CrowdManager : MonoBehaviour
 
         unit.SetFollower(FollowerUnit.CrowdTeam.Player, player, playerFollowers.Count - 1);
 
-        if (useTeamTintOnFollowers)
+        if (wasEnemy || useTeamTintOnFollowers)
             SetColor(obj, playerColor);
         SetupFollowerAnimator(obj);
         SetupFollowerPhysics(obj);
@@ -986,14 +1686,24 @@ public class CrowdManager : MonoBehaviour
                         stolen.Add(go);
                 }
 
-                foreach (GameObject enemy in stolen)
-                    ConvertToPlayer(enemy);
+                if (opponent != null && opponent.alwaysHuntPlayer)
+                {
+                    for (int i = 0; i < stolen.Count; i++)
+                    {
+                        GameObject go = stolen[i];
+                        if (go == null) continue;
+                        enemyFollowers.Remove(go);
+                        Destroy(go);
+                    }
+                }
+                else
+                {
+                    foreach (GameObject enemy in stolen)
+                        ConvertToPlayer(enemy);
+                }
 
                 if (opponent != null)
-                {
-                    enemyLeaders.Remove(opponent);
-                    Destroy(opponent.gameObject);
-                }
+                    RemoveDefeatedEnemyLeader(opponent);
             }
             else
             {
@@ -1024,6 +1734,32 @@ public class CrowdManager : MonoBehaviour
             SceneManager.LoadScene("LoseScene");
         }
 
+        UpdateUI();
+    }
+
+    void RemoveDefeatedEnemyLeader(EnemyLeader opponent)
+    {
+        if (opponent == null) return;
+
+        opponent.MarkDefeated();
+        enemyLeaders.Remove(opponent);
+
+        if (opponent.gameObject != null)
+            Destroy(opponent.gameObject);
+    }
+
+    /// <summary>Clears recruited followers so each wave starts with the player alone.</summary>
+    public void ClearPlayerCrowdForNewWave()
+    {
+        for (int i = playerFollowers.Count - 1; i >= 0; i--)
+        {
+            GameObject go = playerFollowers[i];
+            if (go != null)
+                Destroy(go);
+        }
+
+        playerFollowers.Clear();
+        RefreshPlayerFormation();
         UpdateUI();
     }
 
@@ -1120,39 +1856,103 @@ public class CrowdManager : MonoBehaviour
             enemyCrowdText.text = "ENEMY CROWD: " + GetTotalEnemyHeadcount();
 
         if (timerText != null)
-            timerText.text = "TIME LEFT: " + Mathf.CeilToInt(timeLeft);
+        {
+            int displayed = Mathf.CeilToInt(timeLeft);
+            timerText.text = "TIME LEFT: " + displayed;
+            if (displayed != _lastTimerLayoutValue)
+            {
+                _lastTimerLayoutValue = displayed;
+                UiLayout1024x768.ApplyTopRight(timerText, SafeTopRow(0));
+            }
+        }
 
         UpdateWaveEndTimerUI();
     }
 
     void EnsureWaveEndTimerText()
     {
-        if (waveEndTimerText != null || timerText == null)
+        if (waveEndTimerText == null)
+        {
+            GameObject existing = FindUiObjectByName("WaveEndTimer");
+            if (existing != null)
+                waveEndTimerText = existing.GetComponent<TextMeshProUGUI>();
+
+            if (waveEndTimerText == null && timerText != null)
+            {
+                var go = new GameObject("WaveEndTimer", typeof(RectTransform));
+                Transform parent = timerText.transform.parent;
+                if (parent == null)
+                {
+                    Canvas canvas = FindFirstObjectByType<Canvas>();
+                    if (canvas != null)
+                        parent = canvas.transform;
+                }
+
+                if (parent != null)
+                    go.transform.SetParent(parent, false);
+
+                waveEndTimerText = go.AddComponent<TextMeshProUGUI>();
+                waveEndTimerText.font = timerText.font;
+                waveEndTimerText.fontStyle = FontStyles.Bold;
+                waveEndTimerText.color = new Color(1f, 0.55f, 0.1f);
+                waveEndTimerText.raycastTarget = false;
+                go.SetActive(false);
+            }
+        }
+
+        if (waveEndTimerText == null)
             return;
 
-        var go = new GameObject("WaveEndTimer", typeof(RectTransform));
-        go.transform.SetParent(timerText.transform.parent, false);
+        if (waveEndTimerText.font == null && timerText != null)
+            waveEndTimerText.font = timerText.font;
 
-        RectTransform rt = go.GetComponent<RectTransform>();
-        RectTransform timerRt = timerText.rectTransform;
-        rt.anchorMin = timerRt.anchorMin;
-        rt.anchorMax = timerRt.anchorMax;
-        rt.pivot = timerRt.pivot;
-        rt.anchoredPosition = timerRt.anchoredPosition + new Vector2(0f, -36f);
-        rt.sizeDelta = timerRt.sizeDelta;
+        ApplyWaveEndTimerLayout();
+    }
 
-        waveEndTimerText = go.AddComponent<TextMeshProUGUI>();
-        waveEndTimerText.font = timerText.font;
-        waveEndTimerText.fontSize = timerText.fontSize;
-        waveEndTimerText.fontStyle = FontStyles.Bold;
-        waveEndTimerText.color = new Color(1f, 0.55f, 0.1f);
-        waveEndTimerText.alignment = TextAlignmentOptions.TopRight;
-        waveEndTimerText.raycastTarget = false;
-        go.SetActive(false);
+    void ApplyWaveEndTimerLayout()
+    {
+        if (waveEndTimerText == null)
+            return;
+
+        UiLayout1024x768.ApplyTopCenter(waveEndTimerText, waveEndTimerTopOffset, 560f, 28);
+    }
+
+    static float SafeTopRow(int rowIndex)
+    {
+        return 28f + rowIndex * 40f;
+    }
+
+    public void ApplyHudLayoutFor1024x768()
+    {
+        Canvas canvas = FindFirstObjectByType<Canvas>();
+        UiLayout1024x768.ConfigureCanvas(canvas);
+
+        UiLayout1024x768.ApplyTopLeft(playerCrowdText, SafeTopRow(0));
+        UiLayout1024x768.ApplyTopLeft(enemyCrowdText, SafeTopRow(1));
+        UiLayout1024x768.ApplyTopRight(timerText, SafeTopRow(0));
+        ApplyWaveEndTimerLayout();
+    }
+
+    static GameObject FindUiObjectByName(string objectName)
+    {
+        GameObject found = GameObject.Find(objectName);
+        if (found != null)
+            return found;
+
+        Transform[] transforms = FindObjectsByType<Transform>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+        for (int i = 0; i < transforms.Length; i++)
+        {
+            if (transforms[i].name == objectName)
+                return transforms[i].gameObject;
+        }
+
+        return null;
     }
 
     void UpdateWaveEndTimerUI()
     {
+        EnsureWaveEndTimerText();
+
         if (waveEndTimerText == null)
             return;
 
@@ -1163,7 +1963,10 @@ public class CrowdManager : MonoBehaviour
             waveEndTimerText.gameObject.SetActive(show);
 
         if (show)
+        {
             waveEndTimerText.text = "WAVE ENDS IN: " + Mathf.CeilToInt(timeLeft);
+            ApplyWaveEndTimerLayout();
+        }
     }
 
     static readonly int BaseColorId = Shader.PropertyToID("_BaseColor"); // URP / Lit
@@ -1299,7 +2102,9 @@ public class CrowdManager : MonoBehaviour
             el.waveMoveSpeedMultiplier = z.enemyMoveSpeedMultiplier;
             el.waveChaseSpeedMultiplier = z.enemyChaseSpeedMultiplier;
             el.waveShockwaveCooldownMultiplier = z.enemyShockwaveCooldownMultiplier;
+            el.maxShockwavesPerWave = z.shockwavesPerWave;
             el.activeWaveAbility = z.enemyAbility;
+            el.ResetWaveShockwaveState();
         }
     }
 

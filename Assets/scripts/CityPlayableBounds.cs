@@ -17,10 +17,14 @@ public class CityPlayableBounds : MonoBehaviour
     [Tooltip("Extra inset for player/enemy leaders near the boundary edge.")]
     public float leaderEdgePadding = 2f;
 
+    Bounds _outerBounds;
     Bounds _interiorBounds;
     bool _isValid;
 
     public bool IsValid => _isValid;
+
+    /// <summary>Axis-aligned box around Wall 1–4 before inner padding.</summary>
+    public Bounds OuterBounds => _outerBounds;
 
     public Bounds InteriorBounds => _interiorBounds;
 
@@ -75,6 +79,7 @@ public class CityPlayableBounds : MonoBehaviour
         if (!hasOuter)
             return;
 
+        _outerBounds = outer;
         _interiorBounds = outer;
         _interiorBounds.Expand(-innerPadding);
 

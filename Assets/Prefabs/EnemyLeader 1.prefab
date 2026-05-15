@@ -5275,8 +5275,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1118105e4abce4849b314f16c02885f5, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  moveSpeed: 4
-  chaseSpeed: 4
+  moveSpeed: 3.65
+  chaseSpeed: 4.6
   wanderRange: 40
   chaseDistance: 35
   animator: {fileID: 5773329560138524921}

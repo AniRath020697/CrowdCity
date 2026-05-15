@@ -46,7 +46,7 @@ public class WaveManager : MonoBehaviour
     public float delayBeforeNextWave = 3f;
 
     [Header("Defaults")]
-    [Tooltip("Each wave: 60s, 3/5/7 enemy leaders, 0/1/2 followers per leader, neutrals 45/55/65, and abilities TurboDash/RallyCry/SurgePulse vs Harrier/StubbornSnap/EchoBlast.")]
+    [Tooltip("Each wave: 60s, 3/5/7 enemy leaders, 1–2 enemy followers total at spawn (then they recruit neutrals), neutrals 45/55/65, and abilities TurboDash/RallyCry/SurgePulse vs Harrier/StubbornSnap/EchoBlast.")]
     public bool applyStandardWaveProgression = true;
 
     [Tooltip("If every wave still has None for player or enemy ability, assign distinct ones for the first three waves (TurboDash → RallyCry → SurgePulse, Harrier → StubbornSnap → EchoBlast).")]
@@ -217,10 +217,14 @@ public class WaveManager : MonoBehaviour
         };
         w.enemyFollowerCount = index switch
         {
-            0 => 0,
+            0 => 1,
             1 => 1,
             _ => 2
         };
+        w.shockwavesPerWave = 2;
+
+        w.enemyMoveSpeedMultiplier = 0.93f;
+        w.enemyChaseSpeedMultiplier = 0.88f;
 
         int abilitySlot = Mathf.Clamp(index + 1, 1, 3);
         w.playerAbility = (PlayerWaveAbility)abilitySlot;
@@ -235,23 +239,26 @@ public class WaveManager : MonoBehaviour
         ApplyStandardWaveProgression(index);
 
         crowd.ResetRunStateForNewWave();
+        crowd.ClearPlayerCrowdForNewWave();
 
         crowd.playAreaCenter = w.playAreaCenter;
         crowd.spawnRange = w.spawnRange;
         crowd.neutralNPCCount = Mathf.Max(0, w.neutralCount);
-        crowd.enemyStartCount = Mathf.Max(0, w.enemyFollowerCount);
+        crowd.enemyStartCount = Mathf.Clamp(w.enemyFollowerCount, 1, 2);
         crowd.waveEnemyLeaderCount = Mathf.Max(1, w.enemyLeaderCount);
         crowd.SetRunTimerForWave(w.waveTimeSeconds);
 
+        crowd.RebuildGameplayFloor();
+
         ApplyPlayerModifiers(w);
         TeleportPlayerAndFollowers(w);
-        crowd.PrunePlayerFollowerList();
-        crowd.RefreshPlayerFormation();
         crowd.DestroyNeutralNPCsInScene();
         crowd.DestroyActiveEnemyCrowd();
-        crowd.RebuildGameplayFloor();
         crowd.SpawnNeutralNPCs();
         crowd.SpawnEnemyCrowd();
+        crowd.ResnapPlayerCrowdToGround();
+        crowd.RefreshPlayerFormation();
+        SnapCameraToPlayer();
         crowd.UpdateUI();
 
         ShowWaveAnnouncement();
@@ -296,55 +303,35 @@ public class WaveManager : MonoBehaviour
 
         pc.waveMoveSpeedMultiplier = w.playerMoveSpeedMultiplier;
         pc.waveShockwaveCooldownMultiplier = w.playerShockwaveCooldownMultiplier;
+        pc.maxShockwavesPerWave = w.shockwavesPerWave;
         pc.activeWaveAbility = w.playerAbility;
         pc.ResetWaveAbilityState();
     }
 
     void TeleportPlayerAndFollowers(WaveZone w)
     {
-        Transform spawn = w.playerSpawn != null ? w.playerSpawn : crowd.playAreaCenter;
-        if (spawn == null) return;
+        Transform spawn = w.playerSpawn != null ? w.playerSpawn : w.playAreaCenter;
+        if (spawn == null || crowd.player == null)
+            return;
 
-        Quaternion rot = spawn.rotation;
-        Vector3 p = new Vector3(spawn.position.x, 0f, spawn.position.z);
+        crowd.PlaceActorAtWaveSpawn(crowd.player, spawn);
+    }
 
-        Rigidbody prb = crowd.player.GetComponent<Rigidbody>();
-        if (prb != null)
-        {
-            prb.position = p;
-            prb.rotation = rot;
-        }
-        else
-        {
-            crowd.player.SetPositionAndRotation(p, rot);
-        }
+    void SnapCameraToPlayer()
+    {
+        if (crowd == null || crowd.player == null)
+            return;
 
-        crowd.SnapRigidbodyToWalkable(crowd.player);
+        Camera cam = Camera.main;
+        if (cam == null)
+            return;
 
-        crowd.PrunePlayerFollowerList();
+        CameraFollow follow = cam.GetComponent<CameraFollow>();
+        if (follow == null)
+            follow = cam.gameObject.AddComponent<CameraFollow>();
 
-        for (int i = 0; i < crowd.playerFollowers.Count; i++)
-        {
-            GameObject go = crowd.playerFollowers[i];
-            if (go == null) continue;
-
-            Vector3 off = new Vector3(Random.Range(-2.5f, 2.5f), 0f, Random.Range(-2.5f, 2.5f));
-            Vector3 t = crowd.player.position + off;
-
-            Rigidbody rb = go.GetComponent<Rigidbody>();
-            if (rb != null)
-                rb.position = t;
-            else
-                go.transform.position = t;
-
-            crowd.SnapRigidbodyToWalkable(go.transform);
-
-            FollowerUnit unit = go.GetComponent<FollowerUnit>();
-            if (unit != null)
-                unit.SetFollower(FollowerUnit.CrowdTeam.Player, crowd.player, i);
-        }
-
-        crowd.RefreshPlayerFormation();
+        follow.player = crowd.player;
+        follow.SnapToPlayerImmediately();
     }
 }
 
@@ -361,9 +348,13 @@ public class WaveZone
 
     [Min(1)] public int enemyLeaderCount = 3;
 
-    [Min(0)] public int enemyFollowerCount = 0;
+    [Tooltip("Total enemy followers spawned at wave start (1–2), shared across all enemy leaders. Leaders can recruit more neutrals during play.")]
+    [Range(1, 2)] public int enemyFollowerCount = 1;
     public float spawnRange = 45f;
     [Min(1f)] public float waveTimeSeconds = 60f;
+
+    [Tooltip("Shockwave uses per wave for the player and each enemy leader.")]
+    [Min(0)] public int shockwavesPerWave = 2;
 
     [Header("Player modifiers")]
     [Tooltip("Multiplies move speed for this wave.")]

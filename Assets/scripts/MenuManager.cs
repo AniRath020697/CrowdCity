@@ -13,6 +13,7 @@ public class MenuManager : MonoBehaviour
 
     void Start()
     {
+        ApplyMenuLayout();
         EnsureTeamNameLabel();
     }
 
@@ -22,17 +23,58 @@ public class MenuManager : MonoBehaviour
             SceneManager.LoadScene(gameSceneName);
     }
 
+    void ApplyMenuLayout()
+    {
+        Canvas canvas = FindFirstObjectByType<Canvas>();
+        UiLayout1024x768.ConfigureCanvas(canvas);
+
+        GameObject titleObject = GameObject.Find("GameTitleText");
+        if (titleObject != null)
+        {
+            TextMeshProUGUI title = titleObject.GetComponent<TextMeshProUGUI>();
+            if (title != null)
+                UiLayout1024x768.ApplyMenuTitle(title);
+        }
+
+        TextMeshProUGUI[] labels = FindObjectsByType<TextMeshProUGUI>(FindObjectsSortMode.None);
+        for (int i = 0; i < labels.Length; i++)
+        {
+            TextMeshProUGUI label = labels[i];
+            if (label == null) continue;
+
+            string name = label.gameObject.name;
+            if (name.IndexOf("PressSpace", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                UiLayout1024x768.ApplyMenuPrompt(label);
+            else if (name == "Om" || name == "Ani")
+            {
+                RectTransform rt = label.rectTransform;
+                rt.anchorMin = new Vector2(0.5f, 0f);
+                rt.anchorMax = new Vector2(0.5f, 0f);
+                rt.pivot = new Vector2(0.5f, 0f);
+                rt.sizeDelta = new Vector2(700f, 32f);
+                label.alignment = TextAlignmentOptions.Center;
+                label.fontSize = 22;
+            }
+        }
+    }
+
     void EnsureTeamNameLabel()
     {
         if (string.IsNullOrWhiteSpace(teamName))
             return;
 
         GameObject existing = GameObject.Find("TeamNameText");
+        TextMeshProUGUI teamLabel;
+
         if (existing != null)
         {
-            TextMeshProUGUI existingLabel = existing.GetComponent<TextMeshProUGUI>();
-            if (existingLabel != null)
-                existingLabel.text = teamName;
+            teamLabel = existing.GetComponent<TextMeshProUGUI>();
+            if (teamLabel != null)
+            {
+                teamLabel.text = teamName;
+                UiLayout1024x768.ApplyMenuSubtitle(teamLabel, -40f);
+            }
+
             return;
         }
 
@@ -47,21 +89,11 @@ public class MenuManager : MonoBehaviour
         var teamObject = new GameObject("TeamNameText", typeof(RectTransform));
         teamObject.transform.SetParent(titleObject.transform.parent, false);
 
-        RectTransform teamRect = teamObject.GetComponent<RectTransform>();
-        RectTransform titleRect = titleLabel.rectTransform;
-        teamRect.anchorMin = titleRect.anchorMin;
-        teamRect.anchorMax = titleRect.anchorMax;
-        teamRect.pivot = titleRect.pivot;
-        teamRect.anchoredPosition = titleRect.anchoredPosition + new Vector2(0f, -52f);
-        teamRect.sizeDelta = titleRect.sizeDelta;
-
-        TextMeshProUGUI teamLabel = teamObject.AddComponent<TextMeshProUGUI>();
+        teamLabel = teamObject.AddComponent<TextMeshProUGUI>();
         teamLabel.font = titleLabel.font;
-        teamLabel.fontSize = Mathf.RoundToInt(titleLabel.fontSize * 0.42f);
         teamLabel.fontStyle = FontStyles.Normal;
         teamLabel.color = titleLabel.color;
-        teamLabel.alignment = TextAlignmentOptions.Center;
-        teamLabel.raycastTarget = false;
         teamLabel.text = teamName;
+        UiLayout1024x768.ApplyMenuSubtitle(teamLabel, -40f);
     }
 }
